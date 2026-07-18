@@ -76,4 +76,9 @@ struct RevisionStreamTests {
         #expect(ownership.begin(generation: 2) == nil)
         #expect(ownership.finish(newSync!, currentGeneration: 2) == true)
     }
+
+    @Test func foregroundPollingIsFasterForActiveTimers() {
+        #expect(RemotePolling.interval(isTimerActive: true) == 2)
+        #expect(RemotePolling.interval(isTimerActive: false) == 5)
+    }
 }

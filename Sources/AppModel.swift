@@ -15,7 +15,10 @@ final class AppModel {
     private var timerState: PersistedTimerState
     @ObservationIgnored private var retryTask: Task<Void, Never>?
     @ObservationIgnored private var syncOwnership = SyncOwnership()
+    @ObservationIgnored private var sessionVerification = SessionVerification()
+    @ObservationIgnored private var sessionVerificationOwner: UUID?
     @ObservationIgnored private var revisionStreamTask: Task<Void, Never>?
+    @ObservationIgnored private var remotePollingTask: Task<Void, Never>?
     @ObservationIgnored private var revisionLifecycle = RevisionStreamLifecycle()
     @ObservationIgnored private var revisionHints = RevisionHintCoalescer()
     @ObservationIgnored private var completionQueuedFor: String?
@@ -26,6 +29,7 @@ final class AppModel {
     private(set) var history: [HistoryItem] = []
     private(set) var isWorking = false
     private(set) var isSyncing = false
+    private(set) var isOffline = false
     private(set) var conflictMessage: String?
     var errorMessage: String?
 
@@ -45,6 +49,7 @@ final class AppModel {
     deinit {
         retryTask?.cancel()
         revisionStreamTask?.cancel()
+        remotePollingTask?.cancel()
     }
 
     var isSignedIn: Bool {
@@ -81,9 +86,10 @@ final class AppModel {
     var deviceMark: String { String(timerState.deviceId.suffix(4)).uppercased() }
 
     var syncLabel: String {
-        if isSyncing { return "Syncing" }
         if conflictMessage != nil { return "Review conflict" }
         if pendingCommandCount > 0 { return "\(pendingCommandCount) queued" }
+        if isOffline { return "Offline" }
+        if isSyncing { return "Syncing" }
         return "In sync"
     }
 
@@ -101,37 +107,54 @@ final class AppModel {
         do {
             guard try await api.restoreTokens() else {
                 guard generation == sessionGeneration else { return }
+                timerState.discardUnownedAccountData()
+                rebuildOptimisticState()
+                persist()
                 sessionState = .signedOut
                 return
             }
             guard generation == sessionGeneration else { return }
-            if let cachedUser = timerState.cachedUser {
-                sessionState = .signedIn(cachedUser)
+            guard let cachedUser = timerState.cachedUser else {
+                sessionGeneration += 1
+                sessionVerification.invalidate()
+                syncOwnership.invalidate()
+                sessionState = .signedOut
+                timerState.discardUnownedAccountData()
+                rebuildOptimisticState()
+                persist()
+                try? await api.clearTokens()
+                return
             }
-            let response = try await api.me()
-            guard generation == sessionGeneration else { return }
-            timerState.prepare(for: response.user)
-            sessionState = .signedIn(response.user)
-            persist()
-            await sync(force: true)
+            sessionState = .signedIn(cachedUser)
+            await verifyRestoredSession(generation: generation)
         } catch AppError.unauthorized {
-            guard generation == sessionGeneration else { return }
-            try? await api.clearTokens()
-            sessionState = .signedOut
+            await invalidateUnauthorizedSession(generation: generation)
         } catch {
             guard generation == sessionGeneration else { return }
-            if timerState.cachedUser == nil { sessionState = .signedOut }
-            errorMessage = "Working locally. \(error.localizedDescription)"
-            scheduleRetry()
+            timerState.discardUnownedAccountData()
+            rebuildOptimisticState()
+            persist()
+            sessionState = .signedOut
+            isOffline = true
         }
     }
 
     func signIn() {
         guard !isWorking else { return }
+        sessionGeneration += 1
+        let generation = sessionGeneration
+        sessionVerification.invalidate()
+        sessionVerificationOwner = nil
+        syncOwnership.invalidate()
+        retryTask?.cancel()
+        retryTask = nil
+        cancelRevisionStream()
         isWorking = true
         errorMessage = nil
         Task {
-            defer { isWorking = false }
+            defer {
+                if generation == sessionGeneration { isWorking = false }
+            }
             do {
                 let challenge = try await api.challenge()
                 let idToken = try await GoogleAuthService.identityToken(nonce: challenge.nonce)
@@ -143,11 +166,15 @@ final class AppModel {
                         platform: Self.platform
                     )
                 )
+                guard generation == sessionGeneration else { return }
                 timerState.prepare(for: me.user)
+                sessionVerification.markVerified(generation: generation)
                 sessionState = .signedIn(me.user)
+                isOffline = false
                 persist()
                 await sync(force: true)
             } catch {
+                guard generation == sessionGeneration else { return }
                 errorMessage = error.localizedDescription
             }
         }
@@ -157,6 +184,9 @@ final class AppModel {
         guard !isWorking else { return }
         sessionGeneration += 1
         sessionState = .signedOut
+        isOffline = false
+        sessionVerification.invalidate()
+        sessionVerificationOwner = nil
         syncOwnership.invalidate()
         isSyncing = false
         revisionHints = RevisionHintCoalescer()
@@ -227,16 +257,20 @@ final class AppModel {
 
     func dismissConflict() { conflictMessage = nil }
 
-    func sync(force: Bool = false) async {
+    func sync(force: Bool = false, showsActivity: Bool = true) async {
         guard isSignedIn else { return }
         let generation = sessionGeneration
+        guard sessionVerification.allows(generation: generation) else {
+            await verifyRestoredSession(generation: generation)
+            return
+        }
         if !force, timerState.pendingCommands.isEmpty { return }
         guard let syncID = syncOwnership.begin(generation: generation) else { return }
         retryTask?.cancel()
-        isSyncing = true
+        if showsActivity { isSyncing = true }
         defer {
             if let requestedFollowUp = syncOwnership.finish(syncID, currentGeneration: sessionGeneration) {
-                isSyncing = false
+                if showsActivity { isSyncing = false }
                 let hintedFollowUp = revisionHints.consumeFollowUp(localRevision: timerState.revision)
                 if isSignedIn,
                    (requestedFollowUp || (generation == sessionGeneration && hintedFollowUp)) {
@@ -268,22 +302,17 @@ final class AppModel {
                 timerState.history = response.history
                 mergeServerClock(response.serverHlcWallMs)
                 rebuildOptimisticState()
+                isOffline = false
+                errorMessage = nil
                 persist()
             } while !timerState.pendingCommands.isEmpty
             startRevisionStream()
+            startRemotePolling()
         } catch AppError.unauthorized {
-            guard generation == sessionGeneration else { return }
-            sessionGeneration += 1
-            sessionState = .signedOut
-            syncOwnership.invalidate()
-            isSyncing = false
-            revisionHints = RevisionHintCoalescer()
-            cancelRevisionStream()
-            errorMessage = AppError.unauthorized.localizedDescription
-            try? await api.clearTokens()
+            await invalidateUnauthorizedSession(generation: generation)
         } catch {
             guard generation == sessionGeneration, isSignedIn else { return }
-            errorMessage = "Working locally. \(error.localizedDescription)"
+            isOffline = true
             scheduleRetry()
         }
     }
@@ -292,6 +321,7 @@ final class AppModel {
         guard isSignedIn else { return }
         completionQueuedFor = nil
         startRevisionStream()
+        startRemotePolling()
         await sync(force: true)
     }
 
@@ -300,6 +330,8 @@ final class AppModel {
         if !active {
             revisionStreamTask?.cancel()
             revisionStreamTask = nil
+            remotePollingTask?.cancel()
+            remotePollingTask = nil
         }
     }
 
@@ -307,6 +339,8 @@ final class AppModel {
         revisionLifecycle.cancelCurrent()
         revisionStreamTask?.cancel()
         revisionStreamTask = nil
+        remotePollingTask?.cancel()
+        remotePollingTask = nil
     }
 
     func nextBreakPhase() -> TimerPhase {
@@ -375,6 +409,56 @@ final class AppModel {
         timerState.hlcWallMs = merged
     }
 
+    private func verifyRestoredSession(generation: Int) async {
+        guard generation == sessionGeneration,
+              isSignedIn,
+              !sessionVerification.allows(generation: generation),
+              timerState.cachedUser != nil,
+              sessionVerificationOwner == nil else { return }
+        let owner = UUID()
+        sessionVerificationOwner = owner
+        defer {
+            if sessionVerificationOwner == owner { sessionVerificationOwner = nil }
+        }
+        do {
+            let response = try await api.me()
+            guard generation == sessionGeneration,
+                  isSignedIn,
+                  sessionVerificationOwner == owner else { return }
+            timerState.prepare(for: response.user)
+            sessionVerification.markVerified(generation: generation)
+            sessionState = .signedIn(response.user)
+            isOffline = false
+            persist()
+            await sync(force: true)
+        } catch AppError.unauthorized {
+            await invalidateUnauthorizedSession(generation: generation)
+        } catch {
+            guard generation == sessionGeneration,
+                  isSignedIn,
+                  sessionVerificationOwner == owner else { return }
+            isOffline = true
+            scheduleRetry()
+        }
+    }
+
+    private func invalidateUnauthorizedSession(generation: Int) async {
+        guard generation == sessionGeneration else { return }
+        sessionGeneration += 1
+        sessionVerification.invalidate()
+        sessionVerificationOwner = nil
+        syncOwnership.invalidate()
+        isSyncing = false
+        revisionHints = RevisionHintCoalescer()
+        retryTask?.cancel()
+        retryTask = nil
+        cancelRevisionStream()
+        sessionState = .signedOut
+        isOffline = false
+        errorMessage = AppError.unauthorized.localizedDescription
+        try? await api.clearTokens()
+    }
+
     private func scheduleRetry() {
         guard retryTask == nil || retryTask?.isCancelled == true else { return }
         retryTask = Task { [weak self] in
@@ -385,8 +469,37 @@ final class AppModel {
         }
     }
 
+    private func startRemotePolling() {
+        guard isSignedIn,
+              sessionVerification.allows(generation: sessionGeneration),
+              revisionLifecycle.isActive,
+              remotePollingTask == nil else { return }
+        let generation = sessionGeneration
+        remotePollingTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self,
+                      generation == self.sessionGeneration,
+                      self.isSignedIn,
+                      self.revisionLifecycle.isActive else { return }
+                let interval = RemotePolling.interval(isTimerActive: self.isTimerActive)
+                do {
+                    try await Task.sleep(for: .seconds(interval))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      generation == self.sessionGeneration,
+                      self.isSignedIn,
+                      self.revisionLifecycle.isActive else { return }
+                await self.sync(force: true, showsActivity: false)
+            }
+        }
+    }
+
     private func startRevisionStream() {
-        guard isSignedIn, let streamID = revisionLifecycle.begin() else { return }
+        guard isSignedIn,
+              sessionVerification.allows(generation: sessionGeneration),
+              let streamID = revisionLifecycle.begin() else { return }
         let generation = sessionGeneration
         revisionStreamTask = Task { [weak self] in
             var retryDelay = 1.0
@@ -412,17 +525,7 @@ final class AppModel {
                           generation == self.sessionGeneration,
                           self.isSignedIn,
                           self.revisionLifecycle.owns(streamID) else { return }
-                    self.sessionGeneration += 1
-                    self.syncOwnership.invalidate()
-                    self.isSyncing = false
-                    self.revisionHints = RevisionHintCoalescer()
-                    self.retryTask?.cancel()
-                    self.retryTask = nil
-                    self.revisionLifecycle.end(streamID)
-                    self.revisionStreamTask = nil
-                    self.sessionState = .signedOut
-                    self.errorMessage = AppError.unauthorized.localizedDescription
-                    try? await self.api.clearTokens()
+                    await self.invalidateUnauthorizedSession(generation: generation)
                     return
                 } catch {
                     guard !Task.isCancelled, self.revisionLifecycle.owns(streamID) else { return }

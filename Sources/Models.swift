@@ -77,6 +77,22 @@ struct RevisionStreamLifecycle: Sendable {
     }
 }
 
+struct SessionVerification: Sendable {
+    private var generation: Int?
+
+    mutating func markVerified(generation: Int) {
+        self.generation = generation
+    }
+
+    mutating func invalidate() {
+        generation = nil
+    }
+
+    func allows(generation: Int) -> Bool {
+        self.generation == generation
+    }
+}
+
 struct SyncOwnership: Sendable {
     private var ownerID: UUID?
     private var requestedGeneration: Int?
@@ -105,6 +121,12 @@ struct SyncOwnership: Sendable {
 
     func isOwned(by id: UUID?) -> Bool {
         id != nil && ownerID == id
+    }
+}
+
+enum RemotePolling {
+    static func interval(isTimerActive: Bool) -> TimeInterval {
+        isTimerActive ? 2 : 5
     }
 }
 
@@ -331,6 +353,15 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
             settings: TimerSettings(),
             cachedUser: nil
         )
+    }
+
+    mutating func discardUnownedAccountData() {
+        guard cachedUser == nil else { return }
+        let existingDeviceID = deviceId
+        let existingSettings = settings
+        self = .fresh()
+        deviceId = existingDeviceID
+        settings = existingSettings
     }
 
     mutating func prepare(for authenticatedUser: User) {

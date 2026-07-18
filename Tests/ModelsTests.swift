@@ -53,6 +53,33 @@ struct ModelsTests {
         #expect(state.canonicalTimer == nil)
     }
 
+    @Test func unownedLegacyDataIsDiscardedBeforeAuthentication() {
+        var state = PersistedTimerState.fresh()
+        let deviceID = state.deviceId
+        state.settings.focusMinutes = 42
+        state.pendingCommands = [command(.start, sequence: 1, elapsed: 0)]
+        state.canonicalTimer = makeTimer(status: .running, elapsed: 0)
+        state.history = [HistoryItem(
+            id: "history-test0001",
+            timerId: "timer-test0001",
+            commandId: nil,
+            phase: .focus,
+            status: "completed",
+            plannedDurationMs: 60_000,
+            completedAt: .now,
+            endedAt: .now
+        )]
+
+        state.discardUnownedAccountData()
+
+        #expect(state.deviceId == deviceID)
+        #expect(state.settings.focusMinutes == 42)
+        #expect(state.pendingCommands.isEmpty)
+        #expect(state.canonicalTimer == nil)
+        #expect(state.history.isEmpty)
+        #expect(state.revision == 0)
+    }
+
     @Test func cancelAddsOptimisticHistory() {
         let running = makeTimer(status: .running, elapsed: 5_000)
         let cancel = command(.cancel, sequence: 2, elapsed: 5_000)
@@ -86,6 +113,16 @@ struct ModelsTests {
         #expect(state.settings.focusMinutes == 25)
         #expect(state.hlcWallMs == 0)
         #expect(state.cachedUser == nil)
+    }
+
+    @Test func sessionVerificationGatesNetworkSyncByGeneration() {
+        var verification = SessionVerification()
+        #expect(!verification.allows(generation: 1))
+        verification.markVerified(generation: 1)
+        #expect(verification.allows(generation: 1))
+        #expect(!verification.allows(generation: 2))
+        verification.invalidate()
+        #expect(!verification.allows(generation: 1))
     }
 
     private func makeTimer(status: CanonicalTimer.Status, elapsed: Int64) -> CanonicalTimer {
