@@ -8,11 +8,17 @@ struct PomodoroughApp: App {
     var body: some Scene {
         WindowGroup {
             RootView(model: model)
-                .task { await model.restore() }
+                .task {
+                    model.setSceneActive(scenePhase == .active)
+                    await model.restore()
+                }
                 .onOpenURL { GoogleAuthService.handle($0) }
                 .onChange(of: scenePhase) { _, phase in
-                    guard phase == .active else { return }
-                    Task { await model.refreshAfterForeground() }
+                    let isActive = phase == .active
+                    model.setSceneActive(isActive)
+                    if isActive {
+                        Task { await model.refreshAfterForeground() }
+                    }
                 }
         }
 #if os(macOS)

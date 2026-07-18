@@ -24,6 +24,7 @@
 		D31A942F600F2AD2BD57150D /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 0EE041835DA15370CCB79786 /* GoogleSignInSwift */; };
 		D33FAB5D214DE97A6B1B9AC7 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D641D6CAC2F40A338AAC120 /* AppModel.swift */; };
 		D71BC324CAE1DF74369577E1 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 7A7020DD3D1717913BB5F1D8 /* GoogleSignIn */; };
+		D93F51A8118C99EC1731A839 /* RevisionStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */; };
 		DE4287D68F65F02C32291ED7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7E580D67B2F342466E4D82 /* KeychainStore.swift */; };
 		F3DC0C00F8130BAE92CCC641 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = E58D7FE3469640FD437B5909 /* Views.swift */; };
 		F96B0C5F596F1D64DE3D07D7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7E580D67B2F342466E4D82 /* KeychainStore.swift */; };
@@ -52,6 +53,7 @@
 		E58D7FE3469640FD437B5909 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		EDD5C1A7BCAC4E8DC9B69286 /* PomodoroughApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PomodoroughApp.swift; sourceTree = "<group>"; };
 		EF4A223E38D4969E741D9514 /* PomodoroughTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PomodoroughTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStreamTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -94,6 +96,7 @@
 			isa = PBXGroup;
 			children = (
 				E1749932E92DA4DF9D18B720 /* ModelsTests.swift */,
+				FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -244,6 +247,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				BA01D804124B58251A96E483 /* ModelsTests.swift in Sources */,
+				D93F51A8118C99EC1731A839 /* RevisionStreamTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -45,6 +45,42 @@ actor APIClient {
         try await send("/api/v1/sync", method: "POST", body: request, authenticated: true)
     }
 
+    func revisionEvents() async throws -> AsyncThrowingStream<Int64, Error> {
+        var request = URLRequest(url: baseURL.appending(path: "/api/v1/stream"))
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("Bearer \(try await validAccessToken())", forHTTPHeaderField: "Authorization")
+        let streamRequest = request
+        let session = self.session
+
+        return AsyncThrowingStream<Int64, Error>(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                do {
+                    let (bytes, response) = try await session.bytes(for: streamRequest)
+                    guard let http = response as? HTTPURLResponse else { throw AppError.invalidResponse }
+                    if http.statusCode == 401 { throw AppError.unauthorized }
+                    guard RevisionStreamResponse.isValid(
+                        statusCode: http.statusCode,
+                        contentType: http.value(forHTTPHeaderField: "Content-Type")
+                    ) else {
+                        throw AppError.server("Invalid revision stream response (\(http.statusCode)).")
+                    }
+
+                    var parser = SSERevisionParser()
+                    for try await line in bytes.lines {
+                        try Task.checkCancellation()
+                        if let revision = parser.consume(line: line) {
+                            continuation.yield(revision)
+                        }
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     func logout() async throws {
         _ = try await perform(
             "/api/v1/auth/logout",
