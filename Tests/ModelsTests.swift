@@ -53,6 +53,17 @@ struct ModelsTests {
         #expect(state.canonicalTimer == nil)
     }
 
+    @Test func cancelAddsOptimisticHistory() {
+        let running = makeTimer(status: .running, elapsed: 5_000)
+        let cancel = command(.cancel, sequence: 2, elapsed: 5_000)
+        let result = TimerReducer.apply(cancel, to: running, history: [])
+
+        #expect(result.0?.status == .cancelled)
+        #expect(result.1.count == 1)
+        #expect(result.1.first?.status == "cancelled")
+        #expect(result.1.first?.endedAt == cancel.occurredAt)
+    }
+
     @Test func clearOnlyRemovesInactiveTimer() {
         let running = makeTimer(status: .running, elapsed: 5_000)
         let clear = command(.clear, sequence: 2, elapsed: 5_000)

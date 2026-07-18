@@ -313,7 +313,7 @@ enum TimerReducer {
             let finished = updated(timer, status: .completed, elapsed: timer.plannedDurationMs, at: command.occurredAt, intent: intent)
             guard !history.contains(where: { $0.commandId == command.id }) else { return (finished, history) }
             let item = HistoryItem(
-                id: "\(command.timerId):\(command.id)",
+                id: command.timerId,
                 timerId: command.timerId,
                 commandId: command.id,
                 phase: command.phase,
@@ -325,7 +325,19 @@ enum TimerReducer {
             return (finished, [item] + history)
         case .cancel:
             guard let timer, timer.id == command.timerId, timer.status == .running || timer.status == .paused else { return (timer, history) }
-            return (updated(timer, status: .cancelled, elapsed: command.observedElapsedMs, at: command.occurredAt, intent: intent), history)
+            let cancelled = updated(timer, status: .cancelled, elapsed: command.observedElapsedMs, at: command.occurredAt, intent: intent)
+            guard !history.contains(where: { $0.commandId == command.id }) else { return (cancelled, history) }
+            let item = HistoryItem(
+                id: command.timerId,
+                timerId: command.timerId,
+                commandId: command.id,
+                phase: command.phase,
+                status: "cancelled",
+                plannedDurationMs: command.plannedDurationMs,
+                completedAt: nil,
+                endedAt: command.occurredAt
+            )
+            return (cancelled, [item] + history)
         case .clear:
             guard let timer, timer.id == command.timerId, timer.status != .running, timer.status != .paused else { return (timer, history) }
             return (nil, history)

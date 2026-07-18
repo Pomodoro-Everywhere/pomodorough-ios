@@ -15,8 +15,13 @@ enum GoogleAuthService {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(clientID: clientID)
 
 #if os(iOS)
-        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
-              let root = scene.keyWindow?.rootViewController else {
+        let scenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive }
+        guard let root = scenes
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow)?
+            .rootViewController else {
             throw AppError.missingPresentationAnchor
         }
         let result = try await GIDSignIn.sharedInstance.signIn(

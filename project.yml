@@ -32,8 +32,10 @@ targets:
   Pomodorough-iOS:
     type: application
     platform: iOS
-    sources: [Sources]
-    resources: [Resources]
+    sources:
+      - path: Sources
+      - path: Resources
+        buildPhase: resources
     info:
       path: Supporting/iOS-Info.plist
       properties:

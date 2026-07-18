@@ -407,7 +407,7 @@ private struct TimerDial: View {
                 status: timer.status.rawValue.capitalized,
                 timeText: Self.timeText(remaining)
             )
-            .onChange(of: remaining <= 0) {
+            .onChange(of: remaining <= 0, initial: true) {
                 if remaining <= 0 { model.completeIfNeeded(timerID: timer.id, at: context.date) }
             }
         }
