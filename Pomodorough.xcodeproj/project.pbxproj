@@ -7,24 +7,27 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		05ADF2030E5861781198DA1B /* UnitPositiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DDC54AA96E93B5ABA535D695 /* UnitPositiveTests.swift */; };
+		25D823E92068B5ED728F0BA2 /* UnitNegativeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB64ABDE6D1BCDDA0900CA91 /* UnitNegativeTests.swift */; };
 		2BE5CDEF3D373057F72AF294 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 1B2F658FFCC6E497932EB5E1 /* GoogleSignIn */; };
+		3FFA600ACA6A8AA43B56AF17 /* IntegrationPositiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2D751D86A53B99D3A7671C7A /* IntegrationPositiveTests.swift */; };
 		471AC410750E1BBBB89BDBDC /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF58A4FC46A48C3BEAA7E13E /* Models.swift */; };
 		58D9FB99984C3C9DE6B8E2A5 /* PomodoroughApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDD5C1A7BCAC4E8DC9B69286 /* PomodoroughApp.swift */; };
 		5C5F3C5C652265C7C81ACB31 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D641D6CAC2F40A338AAC120 /* AppModel.swift */; };
 		6489DB8DEDA781EDD7C19DF6 /* GoogleAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C24F7A45B3B70459A21180A /* GoogleAuthService.swift */; };
 		83CBB05092621687C1CD6752 /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5763B6AA139E86DBCDE4D11C /* APIClient.swift */; };
 		94DAD594DE4C0DDB7BC40D7A /* APIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5763B6AA139E86DBCDE4D11C /* APIClient.swift */; };
+		98B4B39B908271919830386D /* IntegrationNegativeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A9EF6C016264040BCC0B92D /* IntegrationNegativeTests.swift */; };
 		A77B9E5B4D71B5AD19D2D931 /* GoogleAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C24F7A45B3B70459A21180A /* GoogleAuthService.swift */; };
+		A8A4A9DDE702DE6C2EB47885 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DDB19D3B83EA6B9769F9D5E /* TestSupport.swift */; };
 		AB492C16E7AF250315F8F18C /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 35AA0AE6D9C79D57FA24B1BD /* GoogleSignInSwift */; };
 		AD39F854C2880ADC57743E1F /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = E58D7FE3469640FD437B5909 /* Views.swift */; };
 		B07D8AF9405E6B21B227E084 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF58A4FC46A48C3BEAA7E13E /* Models.swift */; };
 		B2295D5A227E68C6503F6D36 /* PomodoroughApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDD5C1A7BCAC4E8DC9B69286 /* PomodoroughApp.swift */; };
-		BA01D804124B58251A96E483 /* ModelsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E1749932E92DA4DF9D18B720 /* ModelsTests.swift */; };
 		C0725FE9385C24B7F5C728E8 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A07D519989D4A2F8C108C3BE /* Assets.xcassets */; };
 		D31A942F600F2AD2BD57150D /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 0EE041835DA15370CCB79786 /* GoogleSignInSwift */; };
 		D33FAB5D214DE97A6B1B9AC7 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D641D6CAC2F40A338AAC120 /* AppModel.swift */; };
 		D71BC324CAE1DF74369577E1 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 7A7020DD3D1717913BB5F1D8 /* GoogleSignIn */; };
-		D93F51A8118C99EC1731A839 /* RevisionStreamTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */; };
 		DE4287D68F65F02C32291ED7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7E580D67B2F342466E4D82 /* KeychainStore.swift */; };
 		F3DC0C00F8130BAE92CCC641 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = E58D7FE3469640FD437B5909 /* Views.swift */; };
 		F96B0C5F596F1D64DE3D07D7 /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CE7E580D67B2F342466E4D82 /* KeychainStore.swift */; };
@@ -41,19 +44,22 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		2D751D86A53B99D3A7671C7A /* IntegrationPositiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntegrationPositiveTests.swift; sourceTree = "<group>"; };
 		30BB1F81B219C5226BF0B212 /* Pomodorough-iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = "Pomodorough-iOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		3C24F7A45B3B70459A21180A /* GoogleAuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleAuthService.swift; sourceTree = "<group>"; };
 		3D641D6CAC2F40A338AAC120 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		5763B6AA139E86DBCDE4D11C /* APIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClient.swift; sourceTree = "<group>"; };
+		6DDB19D3B83EA6B9769F9D5E /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		7A9EF6C016264040BCC0B92D /* IntegrationNegativeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = IntegrationNegativeTests.swift; sourceTree = "<group>"; };
 		A07D519989D4A2F8C108C3BE /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A543B78D3746FBC6C1F0A98C /* Pomodorough-macOS.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Pomodorough-macOS.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		CE7E580D67B2F342466E4D82 /* KeychainStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeychainStore.swift; sourceTree = "<group>"; };
 		CF58A4FC46A48C3BEAA7E13E /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
-		E1749932E92DA4DF9D18B720 /* ModelsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsTests.swift; sourceTree = "<group>"; };
+		DB64ABDE6D1BCDDA0900CA91 /* UnitNegativeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnitNegativeTests.swift; sourceTree = "<group>"; };
+		DDC54AA96E93B5ABA535D695 /* UnitPositiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnitPositiveTests.swift; sourceTree = "<group>"; };
 		E58D7FE3469640FD437B5909 /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
 		EDD5C1A7BCAC4E8DC9B69286 /* PomodoroughApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PomodoroughApp.swift; sourceTree = "<group>"; };
 		EF4A223E38D4969E741D9514 /* PomodoroughTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = PomodoroughTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RevisionStreamTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -95,8 +101,11 @@
 		2161B27974D486AF4BE739FF /* Tests */ = {
 			isa = PBXGroup;
 			children = (
-				E1749932E92DA4DF9D18B720 /* ModelsTests.swift */,
-				FC5DB56A73DF20EEE550FE05 /* RevisionStreamTests.swift */,
+				7A9EF6C016264040BCC0B92D /* IntegrationNegativeTests.swift */,
+				2D751D86A53B99D3A7671C7A /* IntegrationPositiveTests.swift */,
+				6DDB19D3B83EA6B9769F9D5E /* TestSupport.swift */,
+				DB64ABDE6D1BCDDA0900CA91 /* UnitNegativeTests.swift */,
+				DDC54AA96E93B5ABA535D695 /* UnitPositiveTests.swift */,
 			);
 			path = Tests;
 			sourceTree = "<group>";
@@ -246,8 +255,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				BA01D804124B58251A96E483 /* ModelsTests.swift in Sources */,
-				D93F51A8118C99EC1731A839 /* RevisionStreamTests.swift in Sources */,
+				98B4B39B908271919830386D /* IntegrationNegativeTests.swift in Sources */,
+				3FFA600ACA6A8AA43B56AF17 /* IntegrationPositiveTests.swift in Sources */,
+				A8A4A9DDE702DE6C2EB47885 /* TestSupport.swift in Sources */,
+				25D823E92068B5ED728F0BA2 /* UnitNegativeTests.swift in Sources */,
+				05ADF2030E5861781198DA1B /* UnitPositiveTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
