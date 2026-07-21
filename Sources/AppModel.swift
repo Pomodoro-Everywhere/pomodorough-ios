@@ -6,7 +6,7 @@ import Observation
 final class AppModel {
     enum SessionState: Equatable {
         case restoring
-        case signedOut
+        case localOnly
         case signedIn(User)
     }
 
@@ -29,10 +29,12 @@ final class AppModel {
     private(set) var sessionState: SessionState = .restoring
     private(set) var canonicalTimer: CanonicalTimer?
     private(set) var history: [HistoryItem] = []
+    private(set) var tasks: [FocusTask] = []
     private(set) var isWorking = false
     private(set) var isSyncing = false
     private(set) var isOffline = false
     private(set) var conflictMessage: String?
+    private(set) var needsPermissionIntroduction = false
     var errorMessage: String?
 
     init(
@@ -50,7 +52,20 @@ final class AppModel {
         } else {
             timerState = .fresh()
         }
+        let migratedLegacyTasks: Bool
+        if let data = defaults.data(forKey: Self.localTaskStorageKey),
+           let state = try? JSONDecoder.api.decode(LocalTaskState.self, from: data) {
+            timerState.migrateLegacyTasks(state)
+            defaults.removeObject(forKey: Self.localTaskStorageKey)
+            migratedLegacyTasks = true
+        } else {
+            migratedLegacyTasks = false
+        }
+#if os(iOS)
+        needsPermissionIntroduction = !defaults.bool(forKey: Self.permissionIntroductionKey)
+#endif
         rebuildOptimisticState()
+        if migratedLegacyTasks { persist() }
     }
 
     deinit {
@@ -77,6 +92,16 @@ final class AppModel {
         }
     }
 
+    var selectedTaskID: UUID? {
+        get { timerState.selectedTaskID }
+        set {
+            guard !isTimerActive,
+                  newValue == nil || tasks.contains(where: { $0.id == newValue }) else { return }
+            timerState.selectedTaskID = newValue
+            persist()
+        }
+    }
+
     var autoStartBreaks: Bool {
         get { timerState.settings.autoStartBreaks }
         set {
@@ -89,13 +114,19 @@ final class AppModel {
         canonicalTimer?.status == .running || canonicalTimer?.status == .paused
     }
 
+    var activeTimer: CanonicalTimer? {
+        isTimerActive ? canonicalTimer : nil
+    }
+
     var pendingCommandCount: Int { timerState.pendingCommands.count }
+    var pendingChangeCount: Int { pendingCommandCount + timerState.pendingTaskOperations.count }
     var completedFocusCount: Int { history.count { $0.status == "completed" && $0.phase == .focus } }
     var deviceMark: String { String(timerState.deviceId.suffix(4)).uppercased() }
 
     var syncLabel: String {
+        if !isSignedIn { return "On device" }
         if conflictMessage != nil { return "Review conflict" }
-        if pendingCommandCount > 0 { return "\(pendingCommandCount) queued" }
+        if pendingChangeCount > 0 { return "\(pendingChangeCount) queued" }
         if isOffline { return "Offline" }
         if isSyncing { return "Syncing" }
         return "In sync"
@@ -103,10 +134,63 @@ final class AppModel {
 
     func durationMinutes(for phase: TimerPhase) -> Int { timerState.settings.minutes(for: phase) }
 
+    func selectPhase(_ phase: TimerPhase) {
+        guard !isTimerActive else { return }
+        clearInactiveTimerForConfigurationChange()
+        selectedPhase = phase
+    }
+
     func setDurationMinutes(_ minutes: Int, for phase: TimerPhase) {
         guard !isTimerActive else { return }
+        clearInactiveTimerForConfigurationChange()
         timerState.settings.setMinutes(minutes, for: phase)
         persist()
+    }
+
+    @discardableResult
+    func addTask(_ title: String) -> Bool {
+        guard let task = FocusTask(title: title) else { return false }
+        guard !tasks.contains(where: { $0.id == task.id }) else { return true }
+        timerState.mergeKnownTasks([task])
+        enqueueTaskOperation(.upsert, task: task)
+        return true
+    }
+
+    func deleteTask(id: UUID) {
+        guard let task = tasks.first(where: { $0.id == id }) else { return }
+        if timerState.selectedTaskID == id { timerState.selectedTaskID = nil }
+        enqueueTaskOperation(.delete, task: task)
+    }
+
+    func task(forTimerID timerID: String) -> FocusTask? {
+        let taskID = canonicalTimer.flatMap { $0.id == timerID ? $0.taskId : nil }
+            ?? history.first(where: { $0.timerId == timerID })?.taskId
+            ?? timerState.pendingCommands.first(where: { $0.timerId == timerID && $0.type == .start })?.taskId
+        guard let taskID, let uuid = UUID(uuidString: taskID) else { return nil }
+        return tasks.first(where: { $0.id == uuid })
+            ?? timerState.knownTasks.first(where: { $0.id == uuid })
+    }
+
+    func taskSummaries(for date: Date = .now, calendar: Calendar = .current) -> [TaskDailySummary] {
+        var totals: [UUID: (finished: Int, timeMs: Int64)] = [:]
+        for item in history {
+            guard item.phase == .focus,
+                  item.status == "completed",
+                  let completedAt = item.completedAt,
+                  calendar.isDate(completedAt, inSameDayAs: date),
+                  let taskID = item.taskId,
+                  let uuid = UUID(uuidString: taskID) else { continue }
+            let current = totals[uuid] ?? (0, 0)
+            totals[uuid] = (current.finished + 1, current.timeMs + item.plannedDurationMs)
+        }
+        return tasks.map { task in
+            let total = totals[task.id] ?? (0, 0)
+            return TaskDailySummary(
+                task: task,
+                finishedPomodoros: total.finished,
+                timeSpentMs: total.timeMs
+            )
+        }
     }
 
     func restore() async {
@@ -115,10 +199,7 @@ final class AppModel {
         do {
             guard try await api.restoreTokens() else {
                 guard generation == sessionGeneration else { return }
-                timerState.discardUnownedAccountData()
-                rebuildOptimisticState()
-                persist()
-                sessionState = .signedOut
+                sessionState = .localOnly
                 return
             }
             guard generation == sessionGeneration else { return }
@@ -126,10 +207,7 @@ final class AppModel {
                 sessionGeneration += 1
                 sessionVerification.invalidate()
                 syncOwnership.invalidate()
-                sessionState = .signedOut
-                timerState.discardUnownedAccountData()
-                rebuildOptimisticState()
-                persist()
+                sessionState = .localOnly
                 try? await api.clearTokens()
                 return
             }
@@ -139,12 +217,17 @@ final class AppModel {
             await invalidateUnauthorizedSession(generation: generation)
         } catch {
             guard generation == sessionGeneration else { return }
-            timerState.discardUnownedAccountData()
-            rebuildOptimisticState()
-            persist()
-            sessionState = .signedOut
-            isOffline = true
+            sessionState = .localOnly
         }
+    }
+
+    func allowTimerAlerts() async {
+        try? await alarmScheduler.requestAuthorization()
+        completePermissionIntroduction()
+    }
+
+    func skipTimerAlertPermissions() {
+        completePermissionIntroduction()
     }
 
     func signIn() {
@@ -176,6 +259,7 @@ final class AppModel {
                 )
                 guard generation == sessionGeneration else { return }
                 timerState.prepare(for: me.user)
+                rebuildOptimisticState()
                 sessionVerification.markVerified(generation: generation)
                 sessionState = .signedIn(me.user)
                 isOffline = false
@@ -194,7 +278,7 @@ final class AppModel {
             cancelAlarm(timerID: timer.id)
         }
         sessionGeneration += 1
-        sessionState = .signedOut
+        sessionState = .localOnly
         isOffline = false
         sessionVerification.invalidate()
         sessionVerificationOwner = nil
@@ -222,9 +306,15 @@ final class AppModel {
         let phase = selectedPhase
         let duration = TimeInterval(minutes * 60)
         let shouldScheduleAlarm = !isTimerActive
+        let taskID = phase == .focus
+            ? timerState.selectedTaskID.flatMap { selected in
+                tasks.first(where: { $0.id == selected })?.id.uuidString.lowercased()
+            }
+            : nil
         enqueue(
             .start,
             timerID: timerID,
+            taskID: taskID,
             phase: phase,
             duration: duration,
             elapsed: 0
@@ -246,10 +336,15 @@ final class AppModel {
 
     func resume(at date: Date = .now) {
         guard let timer = canonicalTimer else { return }
+        let remainingDuration = max(1, timer.remaining(at: date))
         enqueue(.resume, timer: timer, elapsed: timer.elapsed(at: date))
         guard timer.status == .paused else { return }
         enqueueAlarmOperation { [alarmScheduler] in
-            try alarmScheduler.resume(timerID: timer.id)
+            try await alarmScheduler.resume(
+                timerID: timer.id,
+                phase: timer.phase,
+                duration: remainingDuration
+            )
         }
     }
 
@@ -280,7 +375,7 @@ final class AppModel {
     func clear() {
         guard let timer = canonicalTimer, !isTimerActive else { return }
         enqueue(.clear, timer: timer, elapsed: timer.elapsed(at: .now))
-        cancelAlarm(timerID: timer.id)
+        cancelAlarm(timerID: timer.id, reportsError: false)
     }
 
     func completeIfNeeded(timerID: String, at date: Date) {
@@ -306,7 +401,7 @@ final class AppModel {
             await verifyRestoredSession(generation: generation)
             return
         }
-        if !force, timerState.pendingCommands.isEmpty { return }
+        if !force, timerState.pendingCommands.isEmpty, timerState.pendingTaskOperations.isEmpty { return }
         guard let syncID = syncOwnership.begin(generation: generation) else { return }
         retryTask?.cancel()
         if showsActivity { isSyncing = true }
@@ -323,11 +418,13 @@ final class AppModel {
         do {
             repeat {
                 let batch = Array(timerState.pendingCommands.prefix(256))
+                let taskBatch = Array(timerState.pendingTaskOperations.prefix(256))
                 let response = try await api.sync(
                     SyncRequest(
                         deviceId: timerState.deviceId,
                         lastRevision: timerState.revision,
-                        commands: batch
+                        commands: batch,
+                        taskOperations: taskBatch
                     )
                 )
                 guard generation == sessionGeneration, isSignedIn else { return }
@@ -335,19 +432,27 @@ final class AppModel {
                 let sentIDs = Set(batch.map(\.id))
                 let acknowledgedIDs = Set(response.acknowledgements.map(\.commandId))
                 guard sentIDs == acknowledgedIDs else { throw AppError.invalidResponse }
+                let sentTaskIDs = Set(taskBatch.map(\.id))
+                let acknowledgedTaskIDs = Set(response.taskAcknowledgements.map(\.operationId))
+                guard sentTaskIDs == acknowledgedTaskIDs else { throw AppError.invalidResponse }
                 timerState.pendingCommands.removeAll { acknowledgedIDs.contains($0.id) }
+                timerState.pendingTaskOperations.removeAll { acknowledgedTaskIDs.contains($0.id) }
                 if let conflict = response.acknowledgements.first(where: { $0.outcome != "applied" }) {
                     conflictMessage = conflict.reason.isEmpty ? "Server resolved a timer action as \(conflict.outcome)." : conflict.reason
+                } else if let conflict = response.taskAcknowledgements.first(where: { $0.outcome != "applied" }) {
+                    conflictMessage = conflict.reason.isEmpty ? "Server resolved a task change as \(conflict.outcome)." : conflict.reason
                 }
                 timerState.revision = response.revision
                 timerState.canonicalTimer = response.canonicalTimer
                 timerState.history = response.history
+                timerState.tasks = response.tasks
+                timerState.mergeKnownTasks(response.tasks)
                 mergeServerClock(response.serverHlcWallMs)
                 rebuildOptimisticState()
                 isOffline = false
                 errorMessage = nil
                 persist()
-            } while !timerState.pendingCommands.isEmpty
+            } while !timerState.pendingCommands.isEmpty || !timerState.pendingTaskOperations.isEmpty
             startRevisionStream()
             startRemotePolling()
         } catch AppError.unauthorized {
@@ -393,6 +498,7 @@ final class AppModel {
         enqueue(
             type,
             timerID: timer.id,
+            taskID: nil,
             phase: timer.phase,
             duration: timer.plannedDuration,
             elapsed: elapsed
@@ -402,22 +508,18 @@ final class AppModel {
     private func enqueue(
         _ type: CommandType,
         timerID: String,
+        taskID: String?,
         phase: TimerPhase,
         duration: TimeInterval,
         elapsed: TimeInterval
     ) {
         let now = Date.now
-        let nowMs = Int64(now.timeIntervalSince1970 * 1_000)
-        if nowMs > timerState.hlcWallMs {
-            timerState.hlcWallMs = nowMs
-            timerState.hlcCounter = 0
-        } else {
-            timerState.hlcCounter += 1
-        }
+        timerState.advanceClock(at: now)
         let command = TimerCommand(
             id: "command-\(UUID().uuidString.lowercased())",
             deviceSequence: timerState.nextSequence,
             timerId: timerID,
+            taskId: type == .start ? taskID : nil,
             type: type,
             phase: phase,
             plannedDurationMs: Int64(duration * 1_000),
@@ -433,13 +535,41 @@ final class AppModel {
         Task { await sync() }
     }
 
-    private func cancelAlarm(timerID: String) {
-        enqueueAlarmOperation { [alarmScheduler] in
+    private func enqueueTaskOperation(_ type: TaskOperationType, task: FocusTask) {
+        let now = Date.now
+        timerState.advanceClock(at: now)
+        timerState.pendingTaskOperations.append(TaskOperation(
+            id: "task-operation-\(UUID().uuidString.lowercased())",
+            taskId: task.id.uuidString.lowercased(),
+            type: type,
+            title: type == .upsert ? task.title : nil,
+            occurredAt: now,
+            hlcWallMs: timerState.hlcWallMs,
+            hlcCounter: timerState.hlcCounter
+        ))
+        rebuildOptimisticState()
+        persist()
+        Task { await sync() }
+    }
+
+    private func cancelAlarm(timerID: String, reportsError: Bool = true) {
+        enqueueAlarmOperation(reportsError: reportsError) { [alarmScheduler] in
             try alarmScheduler.cancel(timerID: timerID)
         }
     }
 
+    private func clearInactiveTimerForConfigurationChange() {
+        guard canonicalTimer != nil, !isTimerActive else { return }
+        clear()
+    }
+
+    private func completePermissionIntroduction() {
+        defaults.set(true, forKey: Self.permissionIntroductionKey)
+        needsPermissionIntroduction = false
+    }
+
     private func enqueueAlarmOperation(
+        reportsError: Bool = true,
         _ operation: @escaping @MainActor () async throws -> Void
     ) {
         let previousOperation = alarmOperationTask
@@ -449,7 +579,9 @@ final class AppModel {
             do {
                 try await operation()
             } catch {
-                self?.errorMessage = "Timer continues in Pomodorough, but its system alarm could not be updated. \(error.localizedDescription)"
+                if reportsError {
+                    self?.errorMessage = "Timer continues in Pomodorough, but its system alarm could not be updated. \(error.localizedDescription)"
+                }
             }
         }
     }
@@ -462,6 +594,16 @@ final class AppModel {
         )
         canonicalTimer = result.timer
         history = result.history
+        for operation in timerState.pendingTaskOperations where operation.type == .upsert {
+            if let title = operation.title, let task = FocusTask(title: title) {
+                timerState.mergeKnownTasks([task])
+            }
+        }
+        tasks = TaskReducer.applying(timerState.pendingTaskOperations, to: timerState.tasks)
+        if let selected = timerState.selectedTaskID,
+           !tasks.contains(where: { $0.id == selected }) {
+            timerState.selectedTaskID = nil
+        }
         if canonicalTimer?.status != .running { completionQueuedFor = nil }
     }
 
@@ -489,6 +631,7 @@ final class AppModel {
                   isSignedIn,
                   sessionVerificationOwner == owner else { return }
             timerState.prepare(for: response.user)
+            rebuildOptimisticState()
             sessionVerification.markVerified(generation: generation)
             sessionState = .signedIn(response.user)
             isOffline = false
@@ -516,7 +659,7 @@ final class AppModel {
         retryTask?.cancel()
         retryTask = nil
         cancelRevisionStream()
-        sessionState = .signedOut
+        sessionState = .localOnly
         isOffline = false
         errorMessage = AppError.unauthorized.localizedDescription
         try? await api.clearTokens()
@@ -618,6 +761,8 @@ final class AppModel {
     }
 
     private static let storageKey = "timer-state-v2"
+    private static let localTaskStorageKey = "local-tasks-v1"
+    private static let permissionIntroductionKey = "permission-introduction-completed-v1"
 
     private static var platform: String {
 #if os(iOS)

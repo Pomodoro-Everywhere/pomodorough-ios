@@ -25,6 +25,26 @@ struct IntegrationNegativeTests {
     }
 
     @Test @MainActor
+    func activeTimerKeepsItsTaskWhenFutureSelectionChanges() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        #expect(model.addTask("Build"))
+        #expect(model.addTask("Review"))
+        let build = try #require(model.tasks.first)
+        let review = try #require(model.tasks.last)
+        model.selectedTaskID = build.id
+        model.start()
+        let timer = try #require(model.canonicalTimer)
+
+        model.selectedTaskID = review.id
+
+        #expect(model.selectedTaskID == build.id)
+        #expect(model.task(forTimerID: timer.id) == build)
+    }
+
+    @Test @MainActor
     func corruptedPersistedStateFallsBackToFreshState() throws {
         let suiteName = "PomodoroughTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -86,7 +106,33 @@ struct IntegrationNegativeTests {
 
         #expect(model.canonicalTimer?.status == .running)
         #expect(model.errorMessage?.contains("Timer continues in Pomodorough") == true)
-        #expect(model.errorMessage?.contains("Allow alarms in Settings") == true)
+        #expect(model.errorMessage?.contains("Allow notifications or alarms in Settings") == true)
+    }
+
+    @Test @MainActor
+    func clearingCancelledTimerIgnoresStaleAlarmCleanupFailure() async throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let scheduler = RecordingAlarmScheduler()
+        let model = AppModel(defaults: defaults, alarmScheduler: scheduler)
+
+        model.start()
+        await model.waitForAlarmOperations()
+        let timer = try #require(model.canonicalTimer)
+        model.cancel(at: timer.anchorAt.addingTimeInterval(10))
+        await model.waitForAlarmOperations()
+        scheduler.cancellationError = TimerAlarmError.authorizationDenied
+
+        model.clear()
+        await model.waitForAlarmOperations()
+
+        #expect(model.canonicalTimer == nil)
+        #expect(model.errorMessage == nil)
+        #expect(scheduler.operations.suffix(2) == [
+            .cancel(timerID: timer.id),
+            .cancel(timerID: timer.id)
+        ])
     }
 
     @Test func apiClientMapsUnauthorizedResponse() async {

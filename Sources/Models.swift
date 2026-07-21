@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct SSERevisionParser: Sendable {
@@ -250,6 +251,7 @@ struct TimerCommand: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let deviceSequence: Int64
     let timerId: String
+    let taskId: String?
     let type: CommandType
     let phase: TimerPhase
     let plannedDurationMs: Int64
@@ -263,10 +265,31 @@ struct SyncRequest: Encodable, Sendable {
     let deviceId: String
     let lastRevision: Int64
     let commands: [TimerCommand]
+    let taskOperations: [TaskOperation]
 }
 
 struct Acknowledgement: Codable, Equatable, Sendable {
     let commandId: String
+    let outcome: String
+    let reason: String
+}
+
+enum TaskOperationType: String, Codable, Sendable {
+    case upsert, delete
+}
+
+struct TaskOperation: Codable, Identifiable, Equatable, Sendable {
+    let id: String
+    let taskId: String
+    let type: TaskOperationType
+    let title: String?
+    let occurredAt: Date
+    let hlcWallMs: Int64
+    let hlcCounter: Int64
+}
+
+struct TaskAcknowledgement: Codable, Equatable, Sendable {
+    let operationId: String
     let outcome: String
     let reason: String
 }
@@ -283,6 +306,7 @@ struct CanonicalTimer: Codable, Equatable, Sendable {
     }
 
     let id: String
+    let taskId: String?
     let phase: TimerPhase
     let status: Status
     let plannedDurationMs: Int64
@@ -307,6 +331,7 @@ struct HistoryItem: Codable, Identifiable, Equatable, Sendable {
     let id: String
     let timerId: String
     let commandId: String?
+    let taskId: String?
     let phase: TimerPhase
     let status: String
     let plannedDurationMs: Int64
@@ -317,13 +342,99 @@ struct HistoryItem: Codable, Identifiable, Equatable, Sendable {
     var minutes: Int { max(1, Int((plannedDurationMs + 59_999) / 60_000)) }
 }
 
+struct FocusTask: Codable, Identifiable, Equatable, Hashable, Sendable {
+    let id: UUID
+    let title: String
+
+    init?(title rawTitle: String) {
+        let title = Self.normalizedTitle(rawTitle)
+        guard !title.isEmpty, Data(title.utf8).count <= 512 else { return nil }
+        self.id = Self.deterministicID(for: title)
+        self.title = title
+    }
+
+    static func normalizedTitle(_ title: String) -> String {
+        let scalars = Array(title.precomposedStringWithCanonicalMapping.unicodeScalars)
+        var lowerBound = 0
+        var upperBound = scalars.count
+        while lowerBound < upperBound, !isPrintable(scalars[lowerBound]) {
+            lowerBound += 1
+        }
+        while upperBound > lowerBound, !isPrintable(scalars[upperBound - 1]) {
+            upperBound -= 1
+        }
+        return scalars[lowerBound..<upperBound].reduce(into: "") { result, scalar in
+            result.unicodeScalars.append(scalar)
+        }
+    }
+
+    private static func deterministicID(for title: String) -> UUID {
+        let digest = SHA256.hash(data: Data("pomodorough.task.v1\0\(title)".utf8))
+        var bytes = Array(digest.prefix(16))
+        bytes[6] = (bytes[6] & 0x0F) | 0x80
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
+    }
+
+    private static func isPrintable(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar == " " { return true }
+        switch scalar.properties.generalCategory {
+        case .control, .format, .surrogate, .privateUse, .unassigned,
+             .lineSeparator, .paragraphSeparator, .spaceSeparator:
+            return false
+        default:
+            return true
+        }
+    }
+}
+
+struct LocalTaskState: Codable, Equatable, Sendable {
+    var tasks: [FocusTask]
+    var selectedTaskID: UUID?
+    var assignments: [String: FocusTask]
+
+    static let empty = Self(tasks: [], selectedTaskID: nil, assignments: [:])
+}
+
+struct TaskDailySummary: Identifiable, Equatable, Sendable {
+    let task: FocusTask
+    let finishedPomodoros: Int
+    let timeSpentMs: Int64
+
+    var id: UUID { task.id }
+}
+
 struct SyncResponse: Decodable, Sendable {
     let acknowledgements: [Acknowledgement]
+    let taskAcknowledgements: [TaskAcknowledgement]
     let revision: Int64
     let canonicalTimer: CanonicalTimer?
     let history: [HistoryItem]
+    let tasks: [FocusTask]
     let serverTime: Date
     let serverHlcWallMs: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case acknowledgements, taskAcknowledgements, revision, canonicalTimer
+        case history, tasks, serverTime, serverHlcWallMs
+    }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        acknowledgements = try values.decode([Acknowledgement].self, forKey: .acknowledgements)
+        taskAcknowledgements = try values.decodeIfPresent([TaskAcknowledgement].self, forKey: .taskAcknowledgements) ?? []
+        revision = try values.decode(Int64.self, forKey: .revision)
+        canonicalTimer = try values.decodeIfPresent(CanonicalTimer.self, forKey: .canonicalTimer)
+        history = try values.decode([HistoryItem].self, forKey: .history)
+        tasks = try values.decodeIfPresent([FocusTask].self, forKey: .tasks) ?? []
+        serverTime = try values.decode(Date.self, forKey: .serverTime)
+        serverHlcWallMs = try values.decode(Int64.self, forKey: .serverHlcWallMs)
+    }
 }
 
 struct HistoryResponse: Decodable, Sendable { let history: [HistoryItem] }
@@ -335,8 +446,12 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
     var hlcWallMs: Int64
     var hlcCounter: Int64
     var pendingCommands: [TimerCommand]
+    var pendingTaskOperations: [TaskOperation]
     var canonicalTimer: CanonicalTimer?
     var history: [HistoryItem]
+    var tasks: [FocusTask]
+    var knownTasks: [FocusTask]
+    var selectedTaskID: UUID?
     var settings: TimerSettings
     var cachedUser: User?
 
@@ -348,20 +463,15 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
             hlcWallMs: 0,
             hlcCounter: 0,
             pendingCommands: [],
+            pendingTaskOperations: [],
             canonicalTimer: nil,
             history: [],
+            tasks: [],
+            knownTasks: [],
+            selectedTaskID: nil,
             settings: TimerSettings(),
             cachedUser: nil
         )
-    }
-
-    mutating func discardUnownedAccountData() {
-        guard cachedUser == nil else { return }
-        let existingDeviceID = deviceId
-        let existingSettings = settings
-        self = .fresh()
-        deviceId = existingDeviceID
-        settings = existingSettings
     }
 
     mutating func prepare(for authenticatedUser: User) {
@@ -377,7 +487,8 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case deviceId, nextSequence, revision, hlcWallMs, hlcCounter
-        case pendingCommands, canonicalTimer, history, settings, cachedUser
+        case pendingCommands, pendingTaskOperations, canonicalTimer, history
+        case tasks, knownTasks, selectedTaskID, settings, cachedUser
     }
 
     init(
@@ -387,8 +498,12 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         hlcWallMs: Int64,
         hlcCounter: Int64,
         pendingCommands: [TimerCommand],
+        pendingTaskOperations: [TaskOperation],
         canonicalTimer: CanonicalTimer?,
         history: [HistoryItem],
+        tasks: [FocusTask],
+        knownTasks: [FocusTask],
+        selectedTaskID: UUID?,
         settings: TimerSettings,
         cachedUser: User?
     ) {
@@ -398,8 +513,12 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         self.hlcWallMs = hlcWallMs
         self.hlcCounter = hlcCounter
         self.pendingCommands = pendingCommands
+        self.pendingTaskOperations = pendingTaskOperations
         self.canonicalTimer = canonicalTimer
         self.history = history
+        self.tasks = tasks
+        self.knownTasks = knownTasks
+        self.selectedTaskID = selectedTaskID
         self.settings = settings
         self.cachedUser = cachedUser
     }
@@ -412,10 +531,128 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         hlcWallMs = try values.decodeIfPresent(Int64.self, forKey: .hlcWallMs) ?? 0
         hlcCounter = try values.decodeIfPresent(Int64.self, forKey: .hlcCounter) ?? 0
         pendingCommands = try values.decode([TimerCommand].self, forKey: .pendingCommands)
+        pendingTaskOperations = try values.decodeIfPresent([TaskOperation].self, forKey: .pendingTaskOperations) ?? []
         canonicalTimer = try values.decodeIfPresent(CanonicalTimer.self, forKey: .canonicalTimer)
         history = try values.decode([HistoryItem].self, forKey: .history)
+        tasks = try values.decodeIfPresent([FocusTask].self, forKey: .tasks) ?? []
+        knownTasks = try values.decodeIfPresent([FocusTask].self, forKey: .knownTasks) ?? tasks
+        selectedTaskID = try values.decodeIfPresent(UUID.self, forKey: .selectedTaskID)
         settings = try values.decodeIfPresent(TimerSettings.self, forKey: .settings) ?? TimerSettings()
         cachedUser = try values.decodeIfPresent(User.self, forKey: .cachedUser)
+    }
+
+    mutating func migrateLegacyTasks(_ legacy: LocalTaskState, at date: Date = .now) {
+        mergeKnownTasks(legacy.tasks + Array(legacy.assignments.values))
+        for task in legacy.tasks where !tasks.contains(where: { $0.id == task.id }) {
+            tasks.append(task)
+        }
+        if let selected = legacy.selectedTaskID,
+           tasks.contains(where: { $0.id == selected }) {
+            selectedTaskID = selected
+        }
+
+        pendingCommands = pendingCommands.map { command in
+            guard command.taskId == nil,
+                  command.type == .start,
+                  let task = legacy.assignments[command.timerId] else { return command }
+            return TimerCommand(
+                id: command.id,
+                deviceSequence: command.deviceSequence,
+                timerId: command.timerId,
+                taskId: task.id.uuidString.lowercased(),
+                type: command.type,
+                phase: command.phase,
+                plannedDurationMs: command.plannedDurationMs,
+                occurredAt: command.occurredAt,
+                hlcWallMs: command.hlcWallMs,
+                hlcCounter: command.hlcCounter,
+                observedElapsedMs: command.observedElapsedMs
+            )
+        }
+        if let timer = canonicalTimer,
+           timer.taskId == nil,
+           let task = legacy.assignments[timer.id] {
+            canonicalTimer = CanonicalTimer(
+                id: timer.id,
+                taskId: task.id.uuidString.lowercased(),
+                phase: timer.phase,
+                status: timer.status,
+                plannedDurationMs: timer.plannedDurationMs,
+                elapsedAtAnchorMs: timer.elapsedAtAnchorMs,
+                anchorAt: timer.anchorAt,
+                lastIntent: timer.lastIntent
+            )
+        }
+        history = history.map { item in
+            guard item.taskId == nil,
+                  let task = legacy.assignments[item.timerId] else { return item }
+            return HistoryItem(
+                id: item.id,
+                timerId: item.timerId,
+                commandId: item.commandId,
+                taskId: task.id.uuidString.lowercased(),
+                phase: item.phase,
+                status: item.status,
+                plannedDurationMs: item.plannedDurationMs,
+                completedAt: item.completedAt,
+                endedAt: item.endedAt
+            )
+        }
+
+        for task in legacy.tasks where !pendingTaskOperations.contains(where: {
+            $0.type == .upsert && UUID(uuidString: $0.taskId) == task.id
+        }) {
+            advanceClock(at: date)
+            pendingTaskOperations.append(TaskOperation(
+                id: "task-operation-\(UUID().uuidString.lowercased())",
+                taskId: task.id.uuidString.lowercased(),
+                type: .upsert,
+                title: task.title,
+                occurredAt: date,
+                hlcWallMs: hlcWallMs,
+                hlcCounter: hlcCounter
+            ))
+        }
+    }
+
+    mutating func advanceClock(at date: Date) {
+        let nowMs = Int64(date.timeIntervalSince1970 * 1_000)
+        if nowMs > hlcWallMs {
+            hlcWallMs = nowMs
+            hlcCounter = 0
+        } else {
+            hlcCounter += 1
+        }
+    }
+
+    mutating func mergeKnownTasks(_ newTasks: [FocusTask]) {
+        for task in newTasks {
+            if let index = knownTasks.firstIndex(where: { $0.id == task.id }) {
+                knownTasks[index] = task
+            } else {
+                knownTasks.append(task)
+            }
+        }
+    }
+}
+
+enum TaskReducer {
+    static func applying(_ operations: [TaskOperation], to baseTasks: [FocusTask]) -> [FocusTask] {
+        operations.sorted(by: precedes).reduce(into: baseTasks) { tasks, operation in
+            guard let taskID = UUID(uuidString: operation.taskId) else { return }
+            tasks.removeAll { $0.id == taskID }
+            guard operation.type == .upsert,
+                  let title = operation.title,
+                  let task = FocusTask(title: title),
+                  task.id == taskID else { return }
+            tasks.append(task)
+        }
+    }
+
+    private static func precedes(_ lhs: TaskOperation, _ rhs: TaskOperation) -> Bool {
+        if lhs.hlcWallMs != rhs.hlcWallMs { return lhs.hlcWallMs < rhs.hlcWallMs }
+        if lhs.hlcCounter != rhs.hlcCounter { return lhs.hlcCounter < rhs.hlcCounter }
+        return lhs.id < rhs.id
     }
 }
 
@@ -445,6 +682,7 @@ enum TimerReducer {
             return (
                 CanonicalTimer(
                     id: command.timerId,
+                    taskId: command.taskId,
                     phase: command.phase,
                     status: .running,
                     plannedDurationMs: command.plannedDurationMs,
@@ -468,6 +706,7 @@ enum TimerReducer {
                 id: command.timerId,
                 timerId: command.timerId,
                 commandId: command.id,
+                taskId: timer.taskId,
                 phase: command.phase,
                 status: "completed",
                 plannedDurationMs: command.plannedDurationMs,
@@ -483,6 +722,7 @@ enum TimerReducer {
                 id: command.timerId,
                 timerId: command.timerId,
                 commandId: command.id,
+                taskId: timer.taskId,
                 phase: command.phase,
                 status: "cancelled",
                 plannedDurationMs: command.plannedDurationMs,
@@ -505,6 +745,7 @@ enum TimerReducer {
     ) -> CanonicalTimer {
         CanonicalTimer(
             id: timer.id,
+            taskId: timer.taskId,
             phase: timer.phase,
             status: status,
             plannedDurationMs: timer.plannedDurationMs,

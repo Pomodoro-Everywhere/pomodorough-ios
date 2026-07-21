@@ -7,10 +7,13 @@ Native SwiftUI client for the local-first Pomodorough timer at [pomodorough.egig
 - Railway/transit-clock visual system adapted from the production website
 - Native Liquid Glass controls on iOS 26+, with iOS 17 material fallbacks
 - Google Sign-In challenge/nonce exchange and rotating bearer tokens stored in Keychain
-- Optimistic local timer with a durable command queue for offline start, pause, resume, finish, cancel, and clear actions
+- No-account, fully offline timer with durable local history and settings
+- Optional sign-in with a durable command queue for cross-device sync
 - Cross-device reconciliation against the server's canonical projection
 - Configurable 1–180 minute focus, short-break, and long-break routes
 - Optional automatic breaks, with a long break every fourth completed focus run
+- One-time permission introduction with AlarmKit alerts and notification fallback
+- Local tasks with deterministic identities, per-pomodoro assignment, and daily focus totals
 - Recent account history, sync state, queued-action count, and conflict feedback
 - VoiceOver labels, Dynamic Type, native controls, stable list identity, and adaptive iPhone/iPad/macOS layouts
 - App icon derived from the production route-clock mark
@@ -49,4 +52,4 @@ xcodebuild -project Pomodorough.xcodeproj \
   build
 ```
 
-Live authentication requires a Google account accepted by the production backend. Timer actions remain local and queued if sync is temporarily unavailable.
+No account or network connection is required. Signing in with a Google account accepted by the production backend adds cross-device sync; timer actions remain local and queued whenever sync is unavailable.

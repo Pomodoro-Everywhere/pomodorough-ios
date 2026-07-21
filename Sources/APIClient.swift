@@ -3,13 +3,14 @@ import Foundation
 actor APIClient {
     private let baseURL = URL(string: "https://pomodorough.egigoka.me")!
     private let session: URLSession
-    private let keychain = KeychainStore()
+    private let keychain: any TokenStoring
     private var tokens: TokenPair?
     private var refreshTask: Task<TokenPair, Error>?
     private var tokenGeneration = 0
 
-    init(session: URLSession = .shared) {
+    init(session: URLSession = .shared, keychain: any TokenStoring = KeychainStore()) {
         self.session = session
+        self.keychain = keychain
     }
 
     func restoreTokens() throws -> Bool {

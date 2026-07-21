@@ -1,7 +1,13 @@
 import Foundation
 import Security
 
-struct KeychainStore: Sendable {
+protocol TokenStoring: Sendable {
+    func load() throws -> TokenPair?
+    func save(_ tokens: TokenPair) throws
+    func delete() throws
+}
+
+struct KeychainStore: TokenStoring {
     private let service = "me.egigoka.pomodorough.native-auth"
     private let account = "token-pair"
 

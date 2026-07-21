@@ -4,6 +4,23 @@ import Testing
 
 @Suite("Unit Positive")
 struct UnitPositiveTests {
+    @Test func taskIdentityIsStableAfterEdgeCleanupAndUnicodeNormalization() throws {
+        let first = try #require(FocusTask(title: "\u{0000}\tCafe\u{0301}\n"))
+        let recreated = try #require(FocusTask(title: "Café"))
+
+        #expect(first.title == "Café")
+        #expect(first.id == recreated.id)
+        #expect(first.id.uuidString.lowercased() == "aaf83054-24b2-8c0e-901f-a974147bfe82")
+        #expect(first.id.uuidString[first.id.uuidString.index(first.id.uuidString.startIndex, offsetBy: 14)] == "8")
+    }
+
+    @Test func taskIdentityPreservesPrintableSpacesAndStripsNonPrintableSeparators() throws {
+        let task = try #require(FocusTask(title: "\u{00a0} Write notes \u{00a0}"))
+
+        #expect(task.title == " Write notes ")
+        #expect(task != FocusTask(title: "Write notes"))
+    }
+
     @Test func timerAlarmIdentityUsesTimerUUID() throws {
         let uuid = try #require(UUID(uuidString: "83A06D73-1D2D-441E-AFC2-E36DA0518613"))
 
@@ -43,6 +60,7 @@ struct UnitPositiveTests {
             id: "history-completed",
             timerId: "timer-completed",
             commandId: "command-completed",
+            taskId: nil,
             phase: .focus,
             status: "completed",
             plannedDurationMs: 60_001,
@@ -53,6 +71,7 @@ struct UnitPositiveTests {
             id: "history-cancelled",
             timerId: "timer-cancelled",
             commandId: "command-cancelled",
+            taskId: nil,
             phase: .shortBreak,
             status: "cancelled",
             plannedDurationMs: 0,
@@ -85,6 +104,15 @@ struct UnitPositiveTests {
         state.settings.focusMinutes = 42
         state.cachedUser = User(id: String(repeating: "a", count: 32), email: "a@example.com", name: "A", avatarUrl: "")
         state.pendingCommands = [TestFixtures.command(.start, sequence: 1, elapsed: 0)]
+        state.pendingTaskOperations = [TaskOperation(
+            id: "task-operation-test",
+            taskId: "aaf83054-24b2-8c0e-901f-a974147bfe82",
+            type: .delete,
+            title: nil,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 1,
+            hlcCounter: 0
+        )]
         state.canonicalTimer = TestFixtures.timer(status: .running, elapsed: 0)
         let newUser = User(id: String(repeating: "b", count: 32), email: "b@example.com", name: "B", avatarUrl: "")
 
@@ -94,6 +122,7 @@ struct UnitPositiveTests {
         #expect(state.settings.focusMinutes == 42)
         #expect(state.cachedUser == newUser)
         #expect(state.pendingCommands.isEmpty)
+        #expect(state.pendingTaskOperations.isEmpty)
         #expect(state.canonicalTimer == nil)
     }
 
@@ -105,10 +134,22 @@ struct UnitPositiveTests {
         state.canonicalTimer = TestFixtures.timer(status: .running, elapsed: 0)
         let original = state
 
-        state.discardUnownedAccountData()
         state.prepare(for: user)
 
         #expect(state == original)
+    }
+
+    @Test func firstAccountClaimsLocalTimerData() {
+        var state = PersistedTimerState.fresh()
+        let user = User(id: "user-a", email: "a@example.com", name: "A", avatarUrl: "")
+        state.pendingCommands = [TestFixtures.command(.start, sequence: 1, elapsed: 0)]
+        state.canonicalTimer = TestFixtures.timer(status: .running, elapsed: 0)
+
+        state.prepare(for: user)
+
+        #expect(state.cachedUser == user)
+        #expect(state.pendingCommands.count == 1)
+        #expect(state.canonicalTimer?.status == .running)
     }
 
     @Test func cancelAddsOptimisticHistory() {
@@ -130,6 +171,7 @@ struct UnitPositiveTests {
             id: "history-test0001",
             timerId: completed.id,
             commandId: "command-finish",
+            taskId: nil,
             phase: .focus,
             status: "completed",
             plannedDurationMs: 60_000,

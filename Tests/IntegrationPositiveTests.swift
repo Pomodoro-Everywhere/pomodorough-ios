@@ -51,6 +51,178 @@ struct IntegrationPositiveTests {
     }
 
     @Test @MainActor
+    func changingDurationClearsInactiveTimerAndUpdatesNextRun() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        model.start()
+        let timer = try #require(model.canonicalTimer)
+        model.cancel(at: timer.anchorAt.addingTimeInterval(10))
+
+        model.setDurationMinutes(15, for: .focus)
+
+        #expect(model.canonicalTimer == nil)
+        #expect(model.durationMinutes(for: .focus) == 15)
+        model.start()
+        let nextTimer = try #require(model.canonicalTimer)
+        #expect(nextTimer.plannedDurationMs == Int64(15 * 60_000))
+    }
+
+    @Test @MainActor
+    func inactivePersistedTimerDoesNotOverrideConfiguredDuration() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var state = PersistedTimerState.fresh()
+        state.settings.setMinutes(15, for: .focus)
+        state.canonicalTimer = CanonicalTimer(
+            id: "timer-stale",
+            taskId: nil,
+            phase: .focus,
+            status: .completed,
+            plannedDurationMs: 25 * 60_000,
+            elapsedAtAnchorMs: 25 * 60_000,
+            anchorAt: TestFixtures.anchor,
+            lastIntent: nil
+        )
+        defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+
+        let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        let staleTimer = try #require(model.canonicalTimer)
+
+        #expect(staleTimer.plannedDurationMs == Int64(25 * 60_000))
+        #expect(model.activeTimer == nil)
+        #expect(model.durationMinutes(for: .focus) == 15)
+    }
+
+    @Test @MainActor
+    func localTaskAssignmentSurvivesDeletionPersistenceAndRecreation() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+
+        #expect(model.addTask("\tWrite release notes\n"))
+        #expect(model.addTask("Write release notes"))
+        let task = try #require(model.tasks.first)
+        #expect(model.tasks.count == 1)
+        model.selectedTaskID = task.id
+        model.setDurationMinutes(1, for: .focus)
+        model.start()
+        let timer = try #require(model.canonicalTimer)
+        #expect(model.task(forTimerID: timer.id) == task)
+        model.finish(at: timer.anchorAt.addingTimeInterval(60))
+
+        model.deleteTask(id: task.id)
+        #expect(model.tasks.isEmpty)
+        #expect(model.taskSummaries().isEmpty)
+        #expect(model.addTask("Write release notes"))
+
+        let restored = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        let recreated = try #require(restored.tasks.first)
+        let summary = try #require(restored.taskSummaries().first)
+        #expect(recreated.id == task.id)
+        #expect(restored.task(forTimerID: timer.id) == task)
+        #expect(summary.finishedPomodoros == 1)
+        #expect(summary.timeSpentMs == 60_000)
+    }
+
+    @Test @MainActor
+    func taskSummariesCountOnlyCompletedFocusPomodorosFromRequestedDay() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try #require(TimeZone(secondsFromGMT: 0))
+        let today = try #require(calendar.date(from: DateComponents(year: 2026, month: 7, day: 21, hour: 12)))
+        let yesterday = try #require(calendar.date(byAdding: .day, value: -1, to: today))
+        let writing = try #require(FocusTask(title: "Writing"))
+        let review = try #require(FocusTask(title: "Review"))
+        var timerState = PersistedTimerState.fresh()
+        timerState.history = [
+            TestFixtures.history(id: "write-25", durationMs: 25 * 60_000, date: today),
+            TestFixtures.history(id: "write-10", durationMs: 10 * 60_000, date: today.addingTimeInterval(60)),
+            TestFixtures.history(id: "review-50", durationMs: 50 * 60_000, date: today),
+            TestFixtures.history(id: "write-cancelled", status: "cancelled", durationMs: 90 * 60_000, date: today),
+            TestFixtures.history(id: "write-break", phase: .shortBreak, durationMs: 5 * 60_000, date: today),
+            TestFixtures.history(id: "write-yesterday", durationMs: 40 * 60_000, date: yesterday)
+        ]
+        let assignments = Dictionary(
+            uniqueKeysWithValues: timerState.history.map { item in
+                (item.timerId, item.timerId == "review-50" ? review : writing)
+            }
+        )
+        let localTasks = LocalTaskState(
+            tasks: [writing, review],
+            selectedTaskID: writing.id,
+            assignments: assignments
+        )
+        defaults.set(try JSONEncoder.api.encode(timerState), forKey: "timer-state-v2")
+        defaults.set(try JSONEncoder.api.encode(localTasks), forKey: "local-tasks-v1")
+
+        let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        let summaries = model.taskSummaries(for: today, calendar: calendar)
+
+        #expect(summaries == [
+            TaskDailySummary(task: writing, finishedPomodoros: 2, timeSpentMs: 35 * 60_000),
+            TaskDailySummary(task: review, finishedPomodoros: 1, timeSpentMs: 50 * 60_000)
+        ])
+    }
+
+    @Test @MainActor
+    func localTimerSurvivesOfflineLaunchWithoutCredentials() async throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let api = APIClient(keychain: EmptyTokenStore())
+        let model = AppModel(api: api, defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        model.setDurationMinutes(1, for: .focus)
+        model.start()
+
+        let restored = AppModel(api: api, defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        await restored.restore()
+
+        #expect(restored.sessionState == .localOnly)
+        #expect(restored.canonicalTimer?.status == .running)
+        #expect(restored.pendingCommandCount == 1)
+        #expect(restored.syncLabel == "On device")
+    }
+
+    @Test @MainActor
+    func permissionIntroductionRequestsAccessOnceAndPersistsCompletion() async throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let scheduler = RecordingAlarmScheduler()
+        let model = AppModel(defaults: defaults, alarmScheduler: scheduler)
+
+        #expect(model.needsPermissionIntroduction)
+        await model.allowTimerAlerts()
+
+        #expect(!model.needsPermissionIntroduction)
+        #expect(scheduler.operations == [.requestAuthorization])
+        let restored = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        #expect(!restored.needsPermissionIntroduction)
+    }
+
+    @Test @MainActor
+    func permissionIntroductionCanBeSkippedWithoutRequestingAccess() throws {
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let scheduler = RecordingAlarmScheduler()
+        let model = AppModel(defaults: defaults, alarmScheduler: scheduler)
+
+        model.skipTimerAlertPermissions()
+
+        #expect(!model.needsPermissionIntroduction)
+        #expect(scheduler.operations.isEmpty)
+        let restored = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
+        #expect(!restored.needsPermissionIntroduction)
+    }
+
+    @Test @MainActor
     func completedFocusAutomaticallyStartsShortBreak() throws {
         let suiteName = "PomodoroughTests.\(UUID().uuidString)"
         let defaults = try #require(UserDefaults(suiteName: suiteName))
@@ -148,7 +320,7 @@ struct IntegrationPositiveTests {
         #expect(scheduler.operations == [
             .schedule(timerID: running.id, phase: .focus, duration: 60),
             .pause(timerID: running.id),
-            .resume(timerID: running.id),
+            .resume(timerID: running.id, phase: .focus, duration: 50),
             .cancel(timerID: running.id)
         ])
     }

@@ -4,6 +4,10 @@ import Testing
 
 @Suite("Unit Negative")
 struct UnitNegativeTests {
+    @Test func taskRejectsTitleContainingOnlyInvisibleEdges() {
+        #expect(FocusTask(title: "\u{0000}\t\n") == nil)
+    }
+
     @Test func timerAlarmIdentityRejectsMalformedTimerIDs() {
         #expect(TimerAlarmScheduler.alarmID(for: "remote-timer") == nil)
         #expect(TimerAlarmScheduler.alarmID(for: "timer-not-a-uuid") == nil)
@@ -59,33 +63,6 @@ struct UnitNegativeTests {
 
         #expect(TimerReducer.apply(pause, to: paused, history: []).0 == paused)
         #expect(TimerReducer.apply(cancel, to: completed, history: []).0 == completed)
-    }
-
-    @Test func unownedLegacyDataIsDiscardedBeforeAuthentication() {
-        var state = PersistedTimerState.fresh()
-        let deviceID = state.deviceId
-        state.settings.focusMinutes = 42
-        state.pendingCommands = [TestFixtures.command(.start, sequence: 1, elapsed: 0)]
-        state.canonicalTimer = TestFixtures.timer(status: .running, elapsed: 0)
-        state.history = [HistoryItem(
-            id: "history-test0001",
-            timerId: "timer-test0001",
-            commandId: nil,
-            phase: .focus,
-            status: "completed",
-            plannedDurationMs: 60_000,
-            completedAt: TestFixtures.anchor,
-            endedAt: TestFixtures.anchor
-        )]
-
-        state.discardUnownedAccountData()
-
-        #expect(state.deviceId == deviceID)
-        #expect(state.settings.focusMinutes == 42)
-        #expect(state.pendingCommands.isEmpty)
-        #expect(state.canonicalTimer == nil)
-        #expect(state.history.isEmpty)
-        #expect(state.revision == 0)
     }
 
     @Test func parserIgnoresKeepaliveUnknownEventsAndMalformedData() {

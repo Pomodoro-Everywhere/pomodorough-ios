@@ -8,10 +8,12 @@ enum TestFixtures {
         status: CanonicalTimer.Status,
         elapsed: Int64,
         phase: TimerPhase = .focus,
-        timerID: String = "timer-test0001"
+        timerID: String = "timer-test0001",
+        taskID: String? = nil
     ) -> CanonicalTimer {
         CanonicalTimer(
             id: timerID,
+            taskId: taskID,
             phase: phase,
             status: status,
             plannedDurationMs: 60_000,
@@ -25,12 +27,14 @@ enum TestFixtures {
         _ type: CommandType,
         sequence: Int64,
         elapsed: Int64,
-        timerID: String = "timer-test0001"
+        timerID: String = "timer-test0001",
+        taskID: String? = nil
     ) -> TimerCommand {
         TimerCommand(
             id: "command-test\(sequence)",
             deviceSequence: sequence,
             timerId: timerID,
+            taskId: taskID,
             type: type,
             phase: .focus,
             plannedDurationMs: 60_000,
@@ -38,6 +42,27 @@ enum TestFixtures {
             hlcWallMs: Int64(anchor.timeIntervalSince1970 * 1_000) + sequence,
             hlcCounter: 0,
             observedElapsedMs: elapsed
+        )
+    }
+
+    static func history(
+        id: String,
+        phase: TimerPhase = .focus,
+        status: String = "completed",
+        durationMs: Int64,
+        date: Date,
+        taskID: String? = nil
+    ) -> HistoryItem {
+        HistoryItem(
+            id: id,
+            timerId: id,
+            commandId: "command-\(id)",
+            taskId: taskID,
+            phase: phase,
+            status: status,
+            plannedDurationMs: durationMs,
+            completedAt: status == "completed" ? date : nil,
+            endedAt: status == "completed" ? nil : date
         )
     }
 
@@ -49,17 +74,31 @@ enum TestFixtures {
     }
 }
 
+struct EmptyTokenStore: TokenStoring {
+    func load() throws -> TokenPair? { nil }
+    func save(_ tokens: TokenPair) throws {}
+    func delete() throws {}
+}
+
 enum RecordedAlarmOperation: Equatable {
+    case requestAuthorization
     case schedule(timerID: String, phase: TimerPhase, duration: TimeInterval)
     case pause(timerID: String)
-    case resume(timerID: String)
+    case resume(timerID: String, phase: TimerPhase, duration: TimeInterval)
     case cancel(timerID: String)
 }
 
 @MainActor
 final class RecordingAlarmScheduler: TimerAlarmScheduling {
     var operations: [RecordedAlarmOperation] = []
+    var authorizationError: Error?
     var schedulingError: Error?
+    var cancellationError: Error?
+
+    func requestAuthorization() async throws {
+        operations.append(.requestAuthorization)
+        if let authorizationError { throw authorizationError }
+    }
 
     func schedule(timerID: String, phase: TimerPhase, duration: TimeInterval) async throws {
         operations.append(.schedule(timerID: timerID, phase: phase, duration: duration))
@@ -70,12 +109,13 @@ final class RecordingAlarmScheduler: TimerAlarmScheduling {
         operations.append(.pause(timerID: timerID))
     }
 
-    func resume(timerID: String) throws {
-        operations.append(.resume(timerID: timerID))
+    func resume(timerID: String, phase: TimerPhase, duration: TimeInterval) async throws {
+        operations.append(.resume(timerID: timerID, phase: phase, duration: duration))
     }
 
     func cancel(timerID: String) throws {
         operations.append(.cancel(timerID: timerID))
+        if let cancellationError { throw cancellationError }
     }
 }
 

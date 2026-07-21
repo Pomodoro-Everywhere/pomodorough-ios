@@ -9,10 +9,10 @@ struct RootView: View {
             switch model.sessionState {
             case .restoring:
                 LaunchView()
-            case .signedOut:
-                SignInView(model: model)
+            case .localOnly:
+                destination
             case .signedIn:
-                SignedInContainer(model: model)
+                destination
             }
         }
         .frame(minWidth: 320, minHeight: 420)
@@ -29,6 +29,19 @@ struct RootView: View {
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
         )
+    }
+
+    @ViewBuilder
+    private var destination: some View {
+#if os(iOS)
+        if model.needsPermissionIntroduction {
+            PermissionIntroductionView(model: model)
+        } else {
+            MainContainer(model: model)
+        }
+#else
+        MainContainer(model: model)
+#endif
     }
 }
 
@@ -49,54 +62,131 @@ private struct LaunchView: View {
     }
 }
 
-private struct SignInView: View {
+#if os(iOS)
+private struct PermissionIntroductionView: View {
     let model: AppModel
+    @State private var isRequesting = false
 
     var body: some View {
         ZStack {
             RailwayBackdrop()
             ScrollView {
-                VStack(spacing: 30) {
-                    RouteClockMark()
-                    VStack(spacing: 8) {
-                        Text("POMODOROUGH")
-                            .font(.system(.largeTitle, design: .rounded, weight: .black))
-                            .tracking(1)
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.65)
-                            .allowsTightening(true)
-                        Text("TIME, IN TRANSIT")
+                VStack(spacing: 24) {
+                    VStack(spacing: 14) {
+                        RouteClockMark()
+                        Text("BEFORE DEPARTURE")
                             .font(.caption.monospaced().bold())
-                            .tracking(3)
+                            .tracking(2)
                             .foregroundStyle(PomodoroughTheme.ticket)
-                        Text("A local-first focus timer that continues across your devices.")
+                        Text("Hear when time is up")
+                            .font(.largeTitle.bold())
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(PomodoroughTheme.porcelain)
+                        Text("Pomodorough can alert you when a focus run or break ends, even when you leave the app.")
                             .font(.body)
                             .multilineTextAlignment(.center)
                             .foregroundStyle(PomodoroughTheme.sky)
-                            .padding(.top, 8)
                     }
-                    GoogleSignInButton(action: model.signIn)
-                        .frame(maxWidth: 280)
-                        .disabled(model.isWorking)
-                        .accessibilityHint("Signs in to sync your timer across devices")
-                    ProgressView("Opening Google")
-                        .tint(PomodoroughTheme.ticket)
+
+                    VStack(spacing: 12) {
+                        PermissionIntroductionCard(
+                            icon: "bell.badge.fill",
+                            title: "Notifications",
+                            detail: "Sends a backup alert when an interval ends. Used on older iOS versions or when alarms are unavailable.",
+                            color: PomodoroughTheme.sky
+                        )
+                        if #available(iOS 26.0, *) {
+                            PermissionIntroductionCard(
+                                icon: "alarm.fill",
+                                title: "Alarms",
+                                detail: "Plays a system timer alarm at the end, including while Pomodorough is not open.",
+                                color: PomodoroughTheme.signal
+                            )
+                        }
+                    }
+
+                    VStack(spacing: 12) {
+                        Button {
+                            isRequesting = true
+                            Task {
+                                await model.allowTimerAlerts()
+                                isRequesting = false
+                            }
+                        } label: {
+                            HStack(spacing: 10) {
+                                if isRequesting {
+                                    ProgressView().tint(PomodoroughTheme.platform)
+                                }
+                                Text("Allow timer alerts")
+                                    .font(.headline)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 52)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(PomodoroughTheme.platform)
+                        .background(PomodoroughTheme.ticket, in: .rect(cornerRadius: 14))
+                        .disabled(isRequesting)
+
+                        Button("Not now") {
+                            model.skipTimerAlertPermissions()
+                        }
+                        .font(.headline)
                         .foregroundStyle(PomodoroughTheme.porcelain)
-                        .opacity(model.isWorking ? 1 : 0)
+                        .frame(minHeight: 44)
+                        .disabled(isRequesting)
+
+                        Text("Permissions are optional. The timer still works while Pomodorough is open.")
+                            .font(.footnote)
+                            .multilineTextAlignment(.center)
+                            .foregroundStyle(PomodoroughTheme.steel)
+                    }
                 }
-                .padding(32)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 32)
                 .frame(maxWidth: 560)
-                .fixedSize(horizontal: false, vertical: true)
-                .glassPanel()
-                .padding(24)
                 .frame(maxWidth: .infinity)
             }
         }
-        .foregroundStyle(PomodoroughTheme.porcelain)
     }
 }
 
-private struct SignedInContainer: View {
+private struct PermissionIntroductionCard: View {
+    let icon: String
+    let title: String
+    let detail: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 16) {
+            Image(systemName: icon)
+                .font(.title2)
+                .foregroundStyle(PomodoroughTheme.platform)
+                .frame(width: 46, height: 46)
+                .background(color, in: .rect(cornerRadius: 12))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(PomodoroughTheme.porcelain)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(PomodoroughTheme.sky)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(PomodoroughTheme.platform.opacity(0.9), in: .rect(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(PomodoroughTheme.porcelain.opacity(0.12), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+#endif
+
+private struct MainContainer: View {
     let model: AppModel
 
     var body: some View {
@@ -107,10 +197,15 @@ private struct SignedInContainer: View {
             LegacyTabs(model: model)
         }
 #else
-        NavigationSplitView {
-            HistoryScreen(model: model)
-        } detail: {
+        TabView {
             TimerScreen(model: model)
+                .tabItem { Label("Timer", systemImage: "timer") }
+            TasksScreen(model: model)
+                .tabItem { Label("Tasks", systemImage: "checklist") }
+            ServicePatternScreen(model: model)
+                .tabItem { Label("Pattern", systemImage: "slider.horizontal.3") }
+            HistoryScreen(model: model)
+                .tabItem { Label("Arrivals", systemImage: "clock.arrow.circlepath") }
         }
 #endif
     }
@@ -125,6 +220,9 @@ private struct ModernTabs: View {
         TabView {
             Tab("Timer", systemImage: "timer") {
                 NavigationStack { TimerScreen(model: model) }
+            }
+            Tab("Tasks", systemImage: "checklist") {
+                NavigationStack { TasksScreen(model: model) }
             }
             Tab("Pattern", systemImage: "slider.horizontal.3") {
                 NavigationStack { ServicePatternScreen(model: model) }
@@ -143,6 +241,8 @@ private struct LegacyTabs: View {
         TabView {
             NavigationStack { TimerScreen(model: model) }
                 .tabItem { Label("Timer", systemImage: "timer") }
+            NavigationStack { TasksScreen(model: model) }
+                .tabItem { Label("Tasks", systemImage: "checklist") }
             NavigationStack { ServicePatternScreen(model: model) }
                 .tabItem { Label("Pattern", systemImage: "slider.horizontal.3") }
             NavigationStack { HistoryScreen(model: model) }
@@ -237,7 +337,8 @@ private struct SyncToolbarStatus: View {
             }
         }
         .accessibilityLabel("Sync status, \(model.syncLabel)")
-        .accessibilityHint("Sync now")
+        .accessibilityHint(model.isSignedIn ? "Sync now" : "Sign in to sync across devices")
+        .disabled(!model.isSignedIn || model.isSyncing)
     }
 }
 
@@ -292,7 +393,7 @@ private struct ServicePatternCard: View {
                     minutes: model.durationMinutes(for: phase),
                     selected: model.selectedPhase == phase,
                     disabled: model.isTimerActive,
-                    select: { model.selectedPhase = phase },
+                    select: { model.selectPhase(phase) },
                     changeMinutes: { model.setDurationMinutes($0, for: phase) }
                 )
             }
@@ -390,7 +491,7 @@ private struct TimerMachineCard: View {
             HStack {
                 Text("CURRENT SERVICE")
                 Spacer()
-                Text((model.canonicalTimer?.status.rawValue ?? "idle").uppercased())
+                Text((model.activeTimer?.status.rawValue ?? "idle").uppercased())
                     .foregroundStyle(PomodoroughTheme.ticket)
             }
             .font(.caption.monospaced().bold())
@@ -398,7 +499,7 @@ private struct TimerMachineCard: View {
             .padding(.bottom, 8)
             .overlay(alignment: .bottom) { Divider().overlay(.white.opacity(0.35)) }
 
-            if let timer = model.canonicalTimer {
+            if let timer = model.activeTimer {
                 TimerDial(timer: timer, model: model, layout: layout)
             } else {
                 IdleTimerDial(
@@ -407,6 +508,7 @@ private struct TimerMachineCard: View {
                     layout: layout
                 )
             }
+            TimerTaskPicker(model: model, layout: layout)
             TimerControls(model: model, layout: layout)
         }
         .padding(layout == .landscape ? 14 : 18)
@@ -421,6 +523,47 @@ private struct TimerMachineCard: View {
             RoundedRectangle(cornerRadius: 24)
                 .stroke(.white.opacity(0.18), lineWidth: 1)
         }
+    }
+}
+
+private struct TimerTaskPicker: View {
+    @Bindable var model: AppModel
+    let layout: TimerLayout
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Label("FOCUS TASK", systemImage: "checklist")
+                .font(.caption.monospaced().bold())
+                .foregroundStyle(PomodoroughTheme.sky)
+                .labelStyle(.titleAndIcon)
+            if model.isTimerActive, let timer = model.canonicalTimer {
+                Text(model.task(forTimerID: timer.id)?.title ?? "No task")
+                    .font(.callout.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .allowsTightening(true)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                    .foregroundStyle(PomodoroughTheme.ticket)
+            } else {
+                Picker("Focus task", selection: $model.selectedTaskID) {
+                    Text("No task").tag(UUID?.none)
+                    ForEach(model.tasks) { task in
+                        Text(task.title).tag(Optional(task.id))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(PomodoroughTheme.ticket)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 14)
+        .frame(minHeight: layout == .landscape ? 40 : 48)
+        .background(PomodoroughTheme.track.opacity(0.58), in: .rect(cornerRadius: 12))
+        .accessibilityElement(children: model.isTimerActive ? .combine : .contain)
     }
 }
 
@@ -595,14 +738,30 @@ private struct TickMarks: Shape {
 }
 
 private struct TimerControls: View {
+    private enum GlassControlID: Hashable {
+        case primary
+        case finish
+        case clear
+        case cancel
+    }
+
+    private enum ControlState: Hashable {
+        case idle
+        case running
+        case paused
+        case clearable
+    }
+
     let model: AppModel
     let layout: TimerLayout
+    @Namespace private var glassNamespace
 
     var body: some View {
         if #available(iOS 26, macOS 26, *) {
             GlassEffectContainer(spacing: 14) {
                 controls(glass: true)
             }
+            .animation(.smooth(duration: 0.4), value: controlState)
         } else {
             controls(glass: false)
         }
@@ -610,27 +769,27 @@ private struct TimerControls: View {
 
     @ViewBuilder
     private func controls(glass: Bool) -> some View {
-        if layout == .landscape {
+        if usesHorizontalControls {
             HStack(spacing: 14) {
                 primaryButton(glass: glass)
                 if model.isTimerActive {
-                    controlButton("Finish", symbol: "checkmark", prominent: false, glass: glass) { model.finish() }
-                    controlButton("Cancel", symbol: "xmark", prominent: false, glass: glass) { model.cancel() }
+                    controlButton("Finish", symbol: "checkmark", glassID: .finish, prominent: false, glass: glass) { model.finish() }
+                    controlButton("Cancel", symbol: "xmark", glassID: .cancel, prominent: false, glass: glass) { model.cancel() }
                 } else if hasClearableTimer {
-                    controlButton("Clear", symbol: "trash", prominent: false, glass: glass, action: model.clear)
+                    controlButton("Clear", symbol: "trash", glassID: .clear, prominent: false, glass: glass, action: model.clear)
                 }
             }
         } else {
             VStack(spacing: 14) {
-                HStack(spacing: 14) {
-                    primaryButton(glass: glass)
-                    if model.isTimerActive {
-                        controlButton("Finish", symbol: "checkmark", prominent: false, glass: glass) { model.finish() }
-                        controlButton("Cancel", symbol: "xmark", prominent: false, glass: glass) { model.cancel() }
+                primaryButton(glass: glass)
+                if model.isTimerActive {
+                    HStack(spacing: 14) {
+                        controlButton("Finish", symbol: "checkmark", glassID: .finish, prominent: false, glass: glass) { model.finish() }
+                        controlButton("Cancel", symbol: "xmark", glassID: .cancel, prominent: false, glass: glass) { model.cancel() }
                     }
                 }
                 if hasClearableTimer {
-                    controlButton("Clear timer", symbol: "trash", prominent: false, glass: glass, action: model.clear)
+                    controlButton("Clear timer", symbol: "trash", glassID: .clear, prominent: false, glass: glass, action: model.clear)
                 }
             }
         }
@@ -639,13 +798,14 @@ private struct TimerControls: View {
     @ViewBuilder
     private func primaryButton(glass: Bool) -> some View {
         if model.canonicalTimer?.status == .running {
-            controlButton("Pause", symbol: "pause.fill", prominent: true, glass: glass) { model.pause() }
+            controlButton("Pause", symbol: "pause.fill", glassID: .primary, prominent: true, glass: glass) { model.pause() }
         } else if model.canonicalTimer?.status == .paused {
-            controlButton("Resume", symbol: "play.fill", prominent: true, glass: glass) { model.resume() }
+            controlButton("Resume", symbol: "play.fill", glassID: .primary, prominent: true, glass: glass) { model.resume() }
         } else {
             controlButton(
                 "Start \(model.selectedPhase.title)",
                 symbol: "play.fill",
+                glassID: .primary,
                 prominent: true,
                 glass: glass,
                 action: model.start
@@ -658,15 +818,39 @@ private struct TimerControls: View {
         return timer.status != .running && timer.status != .paused
     }
 
+    private var usesHorizontalControls: Bool {
+#if os(iOS)
+        layout == .landscape
+#else
+        true
+#endif
+    }
+
+    private var controlState: ControlState {
+        if model.canonicalTimer?.status == .running {
+            return .running
+        }
+        if model.canonicalTimer?.status == .paused {
+            return .paused
+        }
+        return hasClearableTimer ? .clearable : .idle
+    }
+
     @ViewBuilder
     private func controlButton(
         _ title: String,
         symbol: String,
+        glassID: GlassControlID,
         prominent: Bool,
         glass: Bool,
         action: @escaping () -> Void
     ) -> some View {
-        let button = Button(title, systemImage: symbol, action: action)
+        let button = Button(action: action) {
+            Label(title, systemImage: symbol)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .allowsTightening(true)
+        }
             .font(.headline)
             .frame(maxWidth: .infinity, minHeight: layout == .landscape ? 54 : 58)
             .buttonBorderShape(.capsule)
@@ -676,11 +860,15 @@ private struct TimerControls: View {
                     .buttonStyle(.glassProminent)
                     .tint(PomodoroughTheme.signal)
                     .controlSize(.extraLarge)
+                    .glassEffectID(glassID, in: glassNamespace)
+                    .glassEffectTransition(glassID == .primary ? .matchedGeometry : .materialize)
             } else {
                 button
                     .buttonStyle(.glass)
                     .tint(PomodoroughTheme.porcelain.opacity(0.16))
                     .controlSize(.extraLarge)
+                    .glassEffectID(glassID, in: glassNamespace)
+                    .glassEffectTransition(glassID == .primary ? .matchedGeometry : .materialize)
             }
         } else {
             button
@@ -750,6 +938,250 @@ private struct HistoryScreen: View {
     }
 }
 
+private struct TasksScreen: View {
+    @Bindable var model: AppModel
+    @State private var newTaskTitle = ""
+    @FocusState private var taskFieldFocused: Bool
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 18) {
+                TaskBoardHero(
+                    finishedPomodoros: summaries.reduce(0) { $0 + $1.finishedPomodoros },
+                    timeSpentMs: summaries.reduce(0) { $0 + $1.timeSpentMs }
+                )
+                TaskComposer(
+                    title: $newTaskTitle,
+                    focused: $taskFieldFocused,
+                    canAdd: canAddTask,
+                    add: addTask
+                )
+                VStack(spacing: 0) {
+                    TaskBoardHeader()
+                    if summaries.isEmpty {
+                        TaskBoardEmptyState()
+                    } else {
+                        ForEach(summaries) { summary in
+                            Divider().overlay(PomodoroughTheme.steel.opacity(0.45))
+                            TaskSummaryRow(summary: summary) {
+                                model.deleteTask(id: summary.id)
+                            }
+                            .contextMenu {
+                                Button("Delete task", systemImage: "trash", role: .destructive) {
+                                    model.deleteTask(id: summary.id)
+                                }
+                            }
+                        }
+                    }
+                }
+                .background(PomodoroughTheme.porcelain, in: .rect(cornerRadius: 20))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20)
+                        .stroke(PomodoroughTheme.track, lineWidth: 2)
+                }
+                .clipShape(.rect(cornerRadius: 20))
+                .animation(.smooth(duration: 0.3), value: summaries.map(\.id))
+            }
+            .padding()
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+        }
+        .background(TimerBackdrop())
+        .navigationTitle("Tasks")
+        .inlineNavigationTitleIfSupported()
+    }
+
+    private var summaries: [TaskDailySummary] {
+        model.taskSummaries()
+    }
+
+    private var canAddTask: Bool {
+        FocusTask(title: newTaskTitle) != nil
+    }
+
+    private func addTask() {
+        if model.addTask(newTaskTitle) {
+            newTaskTitle = ""
+            taskFieldFocused = false
+        }
+    }
+}
+
+private struct TaskBoardHero: View {
+    let finishedPomodoros: Int
+    let timeSpentMs: Int64
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                RouteClockMark(compact: true)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("TODAY'S ROUTES")
+                        .font(.caption.monospaced().bold())
+                        .tracking(1.4)
+                        .foregroundStyle(PomodoroughTheme.ticket)
+                    Text(Date.now, format: .dateTime.weekday(.wide).month(.abbreviated).day())
+                        .font(.title3.weight(.bold))
+                }
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 0) {
+                TaskBoardMetric(label: "FINISHED", value: "\(finishedPomodoros)")
+                Divider()
+                    .overlay(PomodoroughTheme.steel.opacity(0.5))
+                    .padding(.horizontal, 18)
+                TaskBoardMetric(label: "FOCUS TIME", value: TaskTimeText.compact(timeSpentMs))
+            }
+        }
+        .padding(18)
+        .foregroundStyle(PomodoroughTheme.porcelain)
+        .background {
+            RoundedRectangle(cornerRadius: 22)
+                .fill(PomodoroughTheme.platform)
+                .shadow(color: PomodoroughTheme.signal.opacity(0.9), radius: 0, x: 6, y: 6)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct TaskBoardMetric: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.caption2.monospaced().bold())
+                .foregroundStyle(PomodoroughTheme.sky)
+            Text(value)
+                .font(.system(.title, design: .rounded, weight: .black))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct TaskComposer: View {
+    @Binding var title: String
+    var focused: FocusState<Bool>.Binding
+    let canAdd: Bool
+    let add: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("ADD A ROUTE")
+                .font(.caption2.monospaced().bold())
+                .tracking(1.2)
+                .foregroundStyle(PomodoroughTheme.platform)
+            HStack(spacing: 10) {
+                TextField("What are you focusing on?", text: $title)
+                    .focused(focused)
+                    .submitLabel(.done)
+                    .onSubmit(add)
+                Button("Add", systemImage: "plus", action: add)
+                    .buttonStyle(.borderedProminent)
+                    .tint(PomodoroughTheme.signal)
+                    .disabled(!canAdd)
+            }
+        }
+        .padding(16)
+        .background(PomodoroughTheme.porcelain, in: .rect(cornerRadius: 18))
+        .overlay {
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(PomodoroughTheme.track, lineWidth: 2)
+        }
+    }
+}
+
+private struct TaskBoardHeader: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("TASK")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("DONE")
+                .frame(width: 48, alignment: .trailing)
+            Text("TIME")
+                .frame(width: 70, alignment: .trailing)
+            Color.clear.frame(width: 32, height: 1)
+        }
+        .font(.caption2.monospaced().bold())
+        .foregroundStyle(PomodoroughTheme.sky)
+        .padding(.horizontal, 14)
+        .frame(minHeight: 42)
+        .background(PomodoroughTheme.track)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct TaskBoardEmptyState: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "signpost.right.and.left")
+                .font(.title2)
+                .foregroundStyle(PomodoroughTheme.signal)
+                .accessibilityHidden(true)
+            Text("No routes posted")
+                .font(.headline)
+            Text("Add a task, then assign it before starting focus.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 20)
+        .padding(.vertical, 30)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct TaskSummaryRow: View {
+    let summary: TaskDailySummary
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(summary.task.title)
+                .font(.body.weight(.semibold))
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text("\(summary.finishedPomodoros)")
+                .frame(width: 48, alignment: .trailing)
+            Text(TaskTimeText.compact(summary.timeSpentMs))
+                .frame(width: 70, alignment: .trailing)
+            Button("Delete \(summary.task.title)", systemImage: "trash", role: .destructive, action: delete)
+                .labelStyle(.iconOnly)
+                .foregroundStyle(PomodoroughTheme.danger)
+                .frame(width: 32, height: 44)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .monospacedDigit()
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(summary.task.title), \(summary.finishedPomodoros) finished pomodoros today, \(TaskTimeText.spoken(summary.timeSpentMs)) spent")
+    }
+}
+
+private enum TaskTimeText {
+    static func compact(_ milliseconds: Int64) -> String {
+        let minutes = Int(milliseconds / 60_000)
+        guard minutes >= 60 else { return "\(minutes)m" }
+        let remainder = minutes % 60
+        return remainder == 0 ? "\(minutes / 60)h" : "\(minutes / 60)h \(remainder)m"
+    }
+
+    static func spoken(_ milliseconds: Int64) -> String {
+        let minutes = Int(milliseconds / 60_000)
+        guard minutes >= 60 else { return "\(minutes) minutes" }
+        let remainder = minutes % 60
+        return remainder == 0
+            ? "\(minutes / 60) hours"
+            : "\(minutes / 60) hours \(remainder) minutes"
+    }
+}
+
 private struct HistoryRow: View {
     let item: HistoryItem
 
@@ -808,6 +1240,21 @@ private struct AccountView: View {
                         }
                         .accessibilityElement(children: .combine)
                     }
+                } else {
+                    Section {
+                        Label("Timer works without internet", systemImage: "iphone")
+                        GoogleSignInButton(action: model.signIn)
+                            .frame(maxWidth: 280)
+                            .disabled(model.isWorking)
+                            .accessibilityHint("Signs in to sync your timer across devices")
+                        if model.isWorking {
+                            ProgressView("Opening Google")
+                        }
+                    } header: {
+                        Text("On-device mode")
+                    } footer: {
+                        Text("Sign in only if you want to sync this timer and its history across devices.")
+                    }
                 }
                 Section("Line status") {
                     LabeledContent("Sync", value: model.syncLabel)
@@ -816,13 +1263,15 @@ private struct AccountView: View {
                     Button("Sync now", systemImage: "arrow.triangle.2.circlepath") {
                         Task { await model.sync(force: true) }
                     }
-                    .disabled(model.isSyncing)
+                    .disabled(!model.isSignedIn || model.isSyncing)
                 }
-                Section {
-                    Button("Sign out", role: .destructive) { confirmsSignOut = true }
-                        .disabled(model.isWorking)
-                } footer: {
-                    Text("Pending timer actions are stored on this device until they can sync.")
+                if model.isSignedIn {
+                    Section {
+                        Button("Sign out", role: .destructive) { confirmsSignOut = true }
+                            .disabled(model.isWorking)
+                    } footer: {
+                        Text("Pending changes are stored on this device until they can sync.")
+                    }
                 }
             }
             .navigationTitle("Account")
@@ -831,8 +1280,8 @@ private struct AccountView: View {
                 Button("Sign out", role: .destructive, action: model.signOut)
                 Button("Cancel", role: .cancel) { }
             } message: {
-                if model.pendingCommandCount > 0 {
-                    Text("This will discard \(model.pendingCommandCount) timer actions still waiting to sync.")
+                if model.pendingChangeCount > 0 {
+                    Text("This will discard \(model.pendingChangeCount) changes still waiting to sync.")
                 } else {
                     Text("Local account and timer data will be removed from this device.")
                 }
