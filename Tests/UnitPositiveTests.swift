@@ -21,6 +21,41 @@ struct UnitPositiveTests {
         #expect(task != FocusTask(title: "Write notes"))
     }
 
+    @Test func taskReducerUsesHLCOrderAndAllowsRecreation() throws {
+        let task = try #require(FocusTask(title: "Write notes"))
+        let taskID = task.id.uuidString.lowercased()
+        let staleUpsert = TaskOperation(
+            id: "task-operation-a",
+            taskId: taskID,
+            type: .upsert,
+            title: task.title,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 1,
+            hlcCounter: 0
+        )
+        let deletion = TaskOperation(
+            id: "task-operation-b",
+            taskId: taskID,
+            type: .delete,
+            title: nil,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 2,
+            hlcCounter: 0
+        )
+        let recreation = TaskOperation(
+            id: "task-operation-c",
+            taskId: taskID,
+            type: .upsert,
+            title: task.title,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 2,
+            hlcCounter: 1
+        )
+
+        #expect(TaskReducer.applying([deletion, staleUpsert], to: [task]).isEmpty)
+        #expect(TaskReducer.applying([recreation, deletion, staleUpsert], to: []) == [task])
+    }
+
     @Test func timerAlarmIdentityUsesTimerUUID() throws {
         let uuid = try #require(UUID(uuidString: "83A06D73-1D2D-441E-AFC2-E36DA0518613"))
 
@@ -96,6 +131,18 @@ struct UnitPositiveTests {
         #expect(result.timer?.elapsedAtAnchorMs == 60_000)
         #expect(result.history.count == 1)
         #expect(result.history.first?.status == "completed")
+    }
+
+    @Test func timerReducerKeepsTaskFromStartThroughCompletion() throws {
+        let taskID = "aaf83054-24b2-8c0e-901f-a974147bfe82"
+        let start = TestFixtures.command(.start, sequence: 1, elapsed: 0, taskID: taskID)
+        let pause = TestFixtures.command(.pause, sequence: 2, elapsed: 12_000, taskID: "different-task")
+        let finish = TestFixtures.command(.finish, sequence: 3, elapsed: 12_000)
+
+        let result = TimerReducer.applying([finish, pause, start], to: nil, history: [])
+
+        #expect(result.timer?.taskId == taskID)
+        #expect(try #require(result.history.first).taskId == taskID)
     }
 
     @Test func accountChangeKeepsDevicePreferences() {

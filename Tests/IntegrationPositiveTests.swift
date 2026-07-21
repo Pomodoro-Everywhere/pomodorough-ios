@@ -163,11 +163,17 @@ struct IntegrationPositiveTests {
 
         let model = AppModel(defaults: defaults, alarmScheduler: RecordingAlarmScheduler())
         let summaries = model.taskSummaries(for: today, calendar: calendar)
+        let migratedData = try #require(defaults.data(forKey: "timer-state-v2"))
+        let migratedState = try JSONDecoder.api.decode(PersistedTimerState.self, from: migratedData)
 
         #expect(summaries == [
             TaskDailySummary(task: writing, finishedPomodoros: 2, timeSpentMs: 35 * 60_000),
             TaskDailySummary(task: review, finishedPomodoros: 1, timeSpentMs: 50 * 60_000)
         ])
+        #expect(defaults.data(forKey: "local-tasks-v1") == nil)
+        #expect(Set(migratedState.pendingTaskOperations.map(\.taskId)) == Set([writing, review].map { $0.id.uuidString.lowercased() }))
+        #expect(migratedState.legacyTaskAssignments.count == timerState.history.count)
+        #expect(migratedState.history.allSatisfy { $0.taskId != nil })
     }
 
     @Test @MainActor
@@ -370,5 +376,10 @@ struct IntegrationPositiveTests {
         #expect(state.settings.focusMinutes == 25)
         #expect(state.hlcWallMs == 0)
         #expect(state.cachedUser == nil)
+        #expect(state.pendingTaskOperations.isEmpty)
+        #expect(state.tasks.isEmpty)
+        #expect(state.knownTasks.isEmpty)
+        #expect(state.selectedTaskID == nil)
+        #expect(state.legacyTaskAssignments.isEmpty)
     }
 }
