@@ -22,12 +22,23 @@ struct RootView: View {
         } message: {
             Text(model.errorMessage ?? "Unknown error")
         }
+        .sheet(isPresented: historyResolutionPresented) {
+            HistoryResolutionView(model: model)
+                .interactiveDismissDisabled()
+        }
     }
 
     private var errorPresented: Binding<Bool> {
         Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
+        )
+    }
+
+    private var historyResolutionPresented: Binding<Bool> {
+        Binding(
+            get: { model.isHistoryResolutionBlocking },
+            set: { _ in }
         )
     }
 
@@ -42,6 +53,203 @@ struct RootView: View {
 #else
         MainContainer(model: model)
 #endif
+    }
+}
+
+private struct HistoryResolutionView: View {
+    let model: AppModel
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                RailwayBackdrop()
+                ScrollView {
+                    VStack(spacing: 22) {
+                        RouteClockMark()
+                        content
+                    }
+                    .padding(24)
+                    .frame(maxWidth: 560)
+                    .frame(maxWidth: .infinity)
+                }
+            }
+            .navigationTitle("Resolve history")
+            .inlineNavigationTitleIfSupported()
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch model.historyResolutionState {
+        case .none:
+            EmptyView()
+        case .preflighting:
+            resolutionStatus(
+                title: "Checking both histories",
+                message: "No local changes will sync until this check finishes."
+            )
+        case .choosing:
+            chooser
+        case .confirming(let strategy):
+            confirmation(for: strategy)
+        case .submitting(let strategy):
+            resolutionStatus(
+                title: "Applying \(strategy.title)",
+                message: "Your choice is saved on this device and can be retried safely."
+            )
+        case .retryable(let strategy):
+            retryCard(strategy: strategy)
+        }
+    }
+
+    private var chooser: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("HISTORY AT A CROSSING")
+                .font(.caption.monospaced().bold())
+                .tracking(1.4)
+                .foregroundStyle(PomodoroughTheme.ticket)
+            Text("Choose which history to keep")
+                .font(.title.bold())
+                .foregroundStyle(PomodoroughTheme.porcelain)
+            Text("This device has \(model.localHistoryResolutionCount) entries. Your account has \(model.remoteHistoryResolutionCount) entries.")
+                .foregroundStyle(PomodoroughTheme.sky)
+
+            resolutionButton(
+                title: "Keep Local",
+                detail: "Replace account history with this device's queued history.",
+                strategy: .replaceRemote
+            )
+            resolutionButton(
+                title: "Keep Remote",
+                detail: "Discard this device's local timer, history, tasks, and pending changes.",
+                strategy: .keepRemote
+            )
+            resolutionButton(
+                title: "Keep Both",
+                detail: "Merge queued local changes into account history.",
+                strategy: .merge
+            )
+        }
+        .padding(20)
+        .background(PomodoroughTheme.platform.opacity(0.94), in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("History conflict")
+    }
+
+    private func resolutionButton(
+        title: String,
+        detail: String,
+        strategy: BootstrapResolutionStrategy
+    ) -> some View {
+        Button {
+            model.requestHistoryResolution(strategy)
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(detail).font(.subheadline).foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(PomodoroughTheme.track)
+        .background(PomodoroughTheme.porcelain, in: .rect(cornerRadius: 14))
+        .accessibilityHint(detail)
+    }
+
+    private func confirmation(for strategy: BootstrapResolutionStrategy) -> some View {
+        VStack(spacing: 18) {
+            Image(systemName: strategy == .merge ? "arrow.trianglehead.merge" : "exclamationmark.triangle.fill")
+                .font(.largeTitle)
+                .foregroundStyle(PomodoroughTheme.signal)
+                .accessibilityHidden(true)
+            Text("Confirm \(strategy.title)")
+                .font(.title.bold())
+                .foregroundStyle(PomodoroughTheme.porcelain)
+            Text(confirmationMessage(for: strategy))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(PomodoroughTheme.sky)
+            Button(strategy.title, role: strategy == .merge ? nil : .destructive) {
+                Task { await model.confirmHistoryResolution() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .frame(maxWidth: .infinity)
+            .accessibilityHint("Confirms \(strategy.title) and starts history resolution")
+            Button("Cancel", role: .cancel, action: model.cancelHistoryResolutionConfirmation)
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                .accessibilityHint("Returns to history choices without changing data")
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity)
+        .background(PomodoroughTheme.platform.opacity(0.94), in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .contain)
+    }
+
+    private func confirmationMessage(for strategy: BootstrapResolutionStrategy) -> String {
+        switch strategy {
+        case .replaceRemote:
+            "Account history will be replaced by local queued history. Remote-only history will be deleted."
+        case .keepRemote:
+            "Local timer, history, tasks, durations, and pending changes will be discarded after server confirmation."
+        case .merge:
+            "Combining histories can produce conflicts or errors. Review this warning, then confirm to continue."
+        }
+    }
+
+    private func resolutionStatus(title: String, message: String) -> some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .controlSize(.large)
+                .tint(PomodoroughTheme.ticket)
+                .accessibilityLabel(title)
+            Text(title)
+                .font(.title2.bold())
+                .foregroundStyle(PomodoroughTheme.porcelain)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(PomodoroughTheme.sky)
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(PomodoroughTheme.platform.opacity(0.94), in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("History resolution in progress")
+        .accessibilityValue(title)
+    }
+
+    private func retryCard(strategy: BootstrapResolutionStrategy?) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "wifi.exclamationmark")
+                .font(.largeTitle)
+                .foregroundStyle(PomodoroughTheme.ticket)
+                .accessibilityHidden(true)
+            Text("History setup needs a retry")
+                .font(.title2.bold())
+                .foregroundStyle(PomodoroughTheme.porcelain)
+            Text(retryMessage(for: strategy))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(PomodoroughTheme.sky)
+            Button("Retry", systemImage: "arrow.clockwise") {
+                Task { await model.retryHistoryResolution() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .accessibilityHint("Retries saved history resolution")
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(PomodoroughTheme.platform.opacity(0.94), in: .rect(cornerRadius: 22))
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("History resolution retry required")
+    }
+
+    private func retryMessage(for strategy: BootstrapResolutionStrategy?) -> String {
+        guard let strategy else {
+            return "Remote history could not be checked. Local data remains unchanged."
+        }
+        return "Your \(strategy.title) request is saved exactly and local data remains unchanged."
     }
 }
 
@@ -190,6 +398,7 @@ private struct MainContainer: View {
     let model: AppModel
 
     var body: some View {
+        Group {
 #if os(iOS)
         if #available(iOS 18, *) {
             ModernTabs(model: model)
@@ -208,6 +417,8 @@ private struct MainContainer: View {
                 .tabItem { Label("Arrivals", systemImage: "clock.arrow.circlepath") }
         }
 #endif
+        }
+        .disabled(model.isHistoryResolutionBlocking)
     }
 }
 
@@ -311,7 +522,7 @@ private enum TimerLayout {
 #if os(iOS)
         self = size.width > size.height ? .landscape : .portrait
 #else
-        self = .portrait
+        self = .landscape
 #endif
     }
 }
@@ -327,8 +538,8 @@ private struct SyncToolbarStatus: View {
                 if model.isSyncing {
                     ProgressView().controlSize(.small)
                 } else {
-                    Image(systemName: model.conflictMessage == nil ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .foregroundStyle(model.conflictMessage == nil ? PomodoroughTheme.platform : PomodoroughTheme.signal)
+                    Image(systemName: model.conflictMessage == nil && !model.isHistoryResolutionBlocking ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundStyle(model.conflictMessage == nil && !model.isHistoryResolutionBlocking ? PomodoroughTheme.platform : PomodoroughTheme.signal)
                         .accessibilityHidden(true)
                 }
                 Text(model.syncLabel.uppercased())
@@ -338,7 +549,7 @@ private struct SyncToolbarStatus: View {
         }
         .accessibilityLabel("Sync status, \(model.syncLabel)")
         .accessibilityHint(model.isSignedIn ? "Sync now" : "Sign in to sync across devices")
-        .disabled(!model.isSignedIn || model.isSyncing)
+        .disabled(!model.isSignedIn || model.isSyncing || model.isHistoryResolutionBlocking)
     }
 }
 
@@ -1268,7 +1479,7 @@ private struct AccountView: View {
                     Button("Sync now", systemImage: "arrow.triangle.2.circlepath") {
                         Task { await model.sync(force: true) }
                     }
-                    .disabled(!model.isSignedIn || model.isSyncing)
+                    .disabled(!model.isSignedIn || model.isSyncing || model.isHistoryResolutionBlocking)
                 }
                 if model.isSignedIn {
                     Section {
@@ -1290,6 +1501,9 @@ private struct AccountView: View {
                 } else {
                     Text("Local account and timer data will be removed from this device.")
                 }
+            }
+            .onChange(of: model.historyResolutionState) {
+                if model.isHistoryResolutionBlocking { dismiss() }
             }
         }
     }

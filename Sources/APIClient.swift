@@ -50,6 +50,27 @@ actor APIClient {
         }
     }
 
+    func bootstrap() async throws -> SyncResponse {
+        do {
+            return try await send("/api/v1/bootstrap", authenticated: true)
+        } catch is DecodingError {
+            throw AppError.invalidResponse
+        }
+    }
+
+    func resolveBootstrap(_ request: BootstrapResolveRequest) async throws -> SyncResponse {
+        do {
+            return try await send(
+                "/api/v1/bootstrap/resolve",
+                method: "POST",
+                body: request,
+                authenticated: true
+            )
+        } catch is DecodingError {
+            throw AppError.invalidResponse
+        }
+    }
+
     func revisionEvents() async throws -> AsyncThrowingStream<Int64, Error> {
         var request = URLRequest(url: baseURL.appending(path: "/api/v1/stream"))
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
@@ -176,6 +197,7 @@ actor APIClient {
         guard (200..<300).contains(http.statusCode) else {
             if http.statusCode == 401 { throw AppError.unauthorized }
             let message = (try? JSONDecoder.api.decode(APIError.self, from: data).error) ?? "Request failed (\(http.statusCode))."
+            if http.statusCode == 409 { throw AppError.conflict(message) }
             throw AppError.server(message)
         }
         return data
@@ -196,6 +218,7 @@ extension JSONEncoder {
     static var api: JSONEncoder {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601WithFractionalSeconds
+        encoder.outputFormatting = [.sortedKeys]
         return encoder
     }
 }

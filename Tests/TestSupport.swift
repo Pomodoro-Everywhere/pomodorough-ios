@@ -84,11 +84,16 @@ enum TestFixtures {
         )
     }
 
-    static func session(for scenario: String) -> URLSession {
+    static func session(for scenario: String, resetsRecorder: Bool = true) -> URLSession {
+        if resetsRecorder { StubRequestRecorder.shared.reset(scenario: scenario) }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StubURLProtocol.self]
         configuration.httpAdditionalHeaders = ["X-Pomodorough-Test-Scenario": scenario]
         return URLSession(configuration: configuration)
+    }
+
+    static func recordedRequests(for scenario: String) -> [RecordedRequest] {
+        StubRequestRecorder.shared.requests(for: scenario)
     }
 }
 
@@ -150,6 +155,39 @@ final class RecordingAlarmScheduler: TimerAlarmScheduling {
     }
 }
 
+struct RecordedRequest: Sendable {
+    let method: String
+    let path: String
+    let body: Data?
+}
+
+final class StubRequestRecorder: @unchecked Sendable {
+    static let shared = StubRequestRecorder()
+
+    private let lock = NSLock()
+    private var storage: [String: [RecordedRequest]] = [:]
+
+    func reset(scenario: String) {
+        lock.withLock { storage[scenario] = [] }
+    }
+
+    func record(_ request: URLRequest, body: Data?, scenario: String) -> Int {
+        lock.withLock {
+            let recorded = RecordedRequest(
+                method: request.httpMethod ?? "GET",
+                path: request.url?.path ?? "",
+                body: body
+            )
+            storage[scenario, default: []].append(recorded)
+            return storage[scenario, default: []].count { $0.path == recorded.path }
+        }
+    }
+
+    func requests(for scenario: String) -> [RecordedRequest] {
+        lock.withLock { storage[scenario] ?? [] }
+    }
+}
+
 final class StubURLProtocol: URLProtocol {
     override class func canInit(with request: URLRequest) -> Bool {
         request.value(forHTTPHeaderField: "X-Pomodorough-Test-Scenario") != nil
@@ -161,6 +199,10 @@ final class StubURLProtocol: URLProtocol {
 
     override func startLoading() {
         let scenario = request.value(forHTTPHeaderField: "X-Pomodorough-Test-Scenario")
+        let requestBody = Self.bodyData(request)
+        let pathAttempt = scenario.map {
+            StubRequestRecorder.shared.record(request, body: requestBody, scenario: $0)
+        } ?? 0
         if scenario == "non-http-response" {
             let response = URLResponse(
                 url: request.url!,
@@ -175,6 +217,7 @@ final class StubURLProtocol: URLProtocol {
 
         let statusCode: Int
         let body: Data
+        let path = request.url?.path
 
         switch scenario {
         case "challenge-success"
@@ -201,6 +244,79 @@ final class StubURLProtocol: URLProtocol {
         case "duration-invalid-ack" where request.url?.path == "/api/v1/me":
             statusCode = 200
             body = Data(#"{"user":{"id":"user-duration-sync","email":"sync@example.com","name":"Sync","avatarUrl":""},"csrfToken":"csrf"}"#.utf8)
+        case _ where Self.usesBootstrapStub(scenario) && path == "/api/v1/me":
+            statusCode = 200
+            body = Self.meBody
+        case _ where Self.usesBootstrapStub(scenario)
+            && request.httpMethod == "GET"
+            && path == "/api/v1/bootstrap":
+            statusCode = 200
+            body = Self.syncResponse(
+                revision: Self.hasRemoteBootstrapHistory(scenario) ? 8 : 5,
+                history: Self.hasRemoteBootstrapHistory(scenario) ? [Self.remoteHistory] : []
+            )
+        case "bootstrap-network-retry"
+            where request.httpMethod == "POST"
+                && path == "/api/v1/bootstrap/resolve"
+                && pathAttempt == 1:
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
+            return
+        case "bootstrap-cas-conflict"
+            where request.httpMethod == "POST"
+                && path == "/api/v1/bootstrap/resolve":
+            statusCode = 409
+            body = Data(#"{"error":"revision conflict"}"#.utf8)
+        case _ where Self.usesBootstrapStub(scenario)
+            && request.httpMethod == "POST"
+            && path == "/api/v1/bootstrap/resolve":
+            statusCode = 200
+            let requestObject = Self.requestObject(requestBody)
+            let strategy = requestObject?["strategy"] as? String
+            body = Self.syncResponse(
+                revision: 9,
+                history: Self.resolvedHistory(for: strategy, scenario: scenario),
+                acknowledgements: Self.acknowledgements(from: requestObject, key: "commands", idKey: "commandId"),
+                taskAcknowledgements: Self.acknowledgements(from: requestObject, key: "taskOperations", idKey: "operationId"),
+                durationAcknowledgements: Self.acknowledgements(from: requestObject, key: "durationOperations", idKey: "operationId"),
+                tasks: Self.tasks(from: requestObject)
+            )
+        case _ where Self.usesBootstrapStub(scenario)
+            && request.httpMethod == "POST"
+            && path == "/api/v1/sync":
+            statusCode = 200
+            let requestObject = Self.requestObject(requestBody)
+            let resolutionRequest = Self.resolutionRequestObject(for: scenario)
+            body = Self.syncResponse(
+                revision: 10,
+                history: Self.resolvedHistory(
+                    for: resolutionRequest?["strategy"] as? String,
+                    scenario: scenario
+                ),
+                acknowledgements: Self.acknowledgements(from: requestObject, key: "commands", idKey: "commandId"),
+                taskAcknowledgements: Self.acknowledgements(from: requestObject, key: "taskOperations", idKey: "operationId"),
+                durationAcknowledgements: Self.acknowledgements(from: requestObject, key: "durationOperations", idKey: "operationId"),
+                tasks: Self.tasks(from: resolutionRequest)
+            )
+        case _ where scenario?.hasPrefix("task-sync") == true && path == "/api/v1/me":
+            statusCode = 200
+            body = Self.meBody
+        case _ where scenario?.hasPrefix("task-sync") == true
+            && request.httpMethod == "POST"
+            && path == "/api/v1/sync":
+            statusCode = 200
+            let requestObject = Self.requestObject(requestBody)
+            body = Self.syncResponse(
+                revision: 12,
+                history: [Self.remoteHistory],
+                taskAcknowledgements: Self.acknowledgements(from: requestObject, key: "taskOperations", idKey: "operationId"),
+                tasks: [Self.remoteTask]
+            )
+        case "task-missing-ack" where path == "/api/v1/me":
+            statusCode = 200
+            body = Self.meBody
+        case "task-missing-ack" where request.httpMethod == "POST" && path == "/api/v1/sync":
+            statusCode = 200
+            body = Self.syncResponse(revision: 12, history: [], tasks: [Self.remoteTask])
         case "duration-sync"
             where request.httpMethod == "POST"
                 && request.url?.path == "/api/v1/sync":
@@ -231,4 +347,131 @@ final class StubURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+
+    private static let meBody = Data(
+        #"{"user":{"id":"user-duration-sync","email":"sync@example.com","name":"Sync","avatarUrl":""},"csrfToken":"csrf"}"#.utf8
+    )
+
+    private static var localHistory: [String: Any] {
+        [
+            "id": "local-history",
+            "timerId": "local-timer",
+            "commandId": "command-test2",
+            "phase": "focus",
+            "status": "completed",
+            "plannedDurationMs": 60_000,
+            "completedAt": "2026-07-21T08:00:00.000Z"
+        ]
+    }
+
+    private static var remoteHistory: [String: Any] {
+        [
+            "id": "remote-history",
+            "timerId": "remote-timer",
+            "commandId": "remote-command",
+            "phase": "focus",
+            "status": "completed",
+            "plannedDurationMs": 1_500_000,
+            "completedAt": "2026-07-20T08:00:00.000Z"
+        ]
+    }
+
+    private static var remoteTask: [String: Any] {
+        [
+            "id": "00000000-0000-8000-8000-000000000001",
+            "title": "Remote task"
+        ]
+    }
+
+    private static func usesBootstrapStub(_ scenario: String?) -> Bool {
+        scenario?.hasPrefix("bootstrap-") == true
+    }
+
+    private static func hasRemoteBootstrapHistory(_ scenario: String?) -> Bool {
+        scenario != "bootstrap-local-only" && scenario?.hasPrefix("bootstrap-empty-") != true
+    }
+
+    private static func requestObject(_ data: Data?) -> [String: Any]? {
+        guard let data else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
+    private static func bodyData(_ request: URLRequest) -> Data? {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 16_384)
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+
+    private static func resolutionRequestObject(for scenario: String?) -> [String: Any]? {
+        guard let scenario,
+              let body = StubRequestRecorder.shared.requests(for: scenario).last(where: {
+                  $0.path == "/api/v1/bootstrap/resolve"
+              })?.body else { return nil }
+        return try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+    }
+
+    private static func acknowledgements(
+        from request: [String: Any]?,
+        key: String,
+        idKey: String
+    ) -> [[String: Any]] {
+        (request?[key] as? [[String: Any]] ?? []).compactMap { operation in
+            guard let id = operation["id"] as? String else { return nil }
+            return [idKey: id, "outcome": "applied", "reason": ""]
+        }
+    }
+
+    private static func tasks(from request: [String: Any]?) -> [[String: Any]] {
+        (request?["taskOperations"] as? [[String: Any]] ?? []).compactMap { operation in
+            guard operation["type"] as? String == "upsert",
+                  let id = operation["taskId"] as? String,
+                  let title = operation["title"] as? String else { return nil }
+            return ["id": id, "title": title]
+        }
+    }
+
+    private static func resolvedHistory(for strategy: String?, scenario: String?) -> [[String: Any]] {
+        if scenario?.hasPrefix("bootstrap-empty-") == true { return [] }
+        return switch strategy {
+        case "replace_remote": [localHistory]
+        case "merge": [localHistory, remoteHistory]
+        default: [remoteHistory]
+        }
+    }
+
+    private static func syncResponse(
+        revision: Int,
+        history: [[String: Any]],
+        acknowledgements: [[String: Any]] = [],
+        taskAcknowledgements: [[String: Any]] = [],
+        durationAcknowledgements: [[String: Any]] = [],
+        tasks: [[String: Any]] = []
+    ) -> Data {
+        try! JSONSerialization.data(withJSONObject: [
+            "acknowledgements": acknowledgements,
+            "taskAcknowledgements": taskAcknowledgements,
+            "durationAcknowledgements": durationAcknowledgements,
+            "durationsMs": [
+                "focus": 1_500_000,
+                "short_break": 300_000,
+                "long_break": 900_000
+            ],
+            "revision": revision,
+            "canonicalTimer": NSNull(),
+            "history": history,
+            "tasks": tasks,
+            "serverTime": "2026-07-21T08:00:00.000Z",
+            "serverHlcWallMs": 1_784_620_800_000,
+            "serverHlcCounter": 4
+        ])
+    }
 }

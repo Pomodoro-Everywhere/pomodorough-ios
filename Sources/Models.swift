@@ -406,6 +406,30 @@ struct SyncRequest: Encodable, Sendable {
     let durationOperations: [DurationOperation]
 }
 
+enum BootstrapResolutionStrategy: String, Codable, Equatable, Sendable {
+    case keepRemote = "keep_remote"
+    case replaceRemote = "replace_remote"
+    case merge
+
+    var title: String {
+        switch self {
+        case .keepRemote: "Keep Remote"
+        case .replaceRemote: "Keep Local"
+        case .merge: "Keep Both"
+        }
+    }
+}
+
+struct BootstrapResolveRequest: Codable, Equatable, Sendable {
+    let requestId: String
+    let deviceId: String
+    let expectedRevision: Int64
+    let strategy: BootstrapResolutionStrategy
+    let commands: [TimerCommand]
+    let taskOperations: [TaskOperation]
+    let durationOperations: [DurationOperation]
+}
+
 struct Acknowledgement: Codable, Equatable, Sendable {
     let commandId: String
     let outcome: String
@@ -633,6 +657,8 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
     var legacyTaskAssignments: [String: UUID]
     var settings: TimerSettings
     var cachedUser: User?
+    var bootstrapUser: User?
+    var pendingBootstrapResolution: BootstrapResolveRequest?
 
     static func fresh() -> Self {
         Self(
@@ -651,7 +677,9 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
             selectedTaskID: nil,
             legacyTaskAssignments: [:],
             settings: TimerSettings(),
-            cachedUser: nil
+            cachedUser: nil,
+            bootstrapUser: nil,
+            pendingBootstrapResolution: nil
         )
     }
 
@@ -666,12 +694,15 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
             settings.autoStartBreaks = existingAutoStartBreaks
         }
         cachedUser = authenticatedUser
+        bootstrapUser = nil
+        pendingBootstrapResolution = nil
     }
 
     private enum CodingKeys: String, CodingKey {
         case deviceId, nextSequence, revision, hlcWallMs, hlcCounter
         case pendingCommands, pendingTaskOperations, pendingDurationOperations, canonicalTimer, history
         case tasks, knownTasks, selectedTaskID, legacyTaskAssignments, settings, cachedUser
+        case bootstrapUser, pendingBootstrapResolution
     }
 
     init(
@@ -690,7 +721,9 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         selectedTaskID: UUID?,
         legacyTaskAssignments: [String: UUID],
         settings: TimerSettings,
-        cachedUser: User?
+        cachedUser: User?,
+        bootstrapUser: User?,
+        pendingBootstrapResolution: BootstrapResolveRequest?
     ) {
         self.deviceId = deviceId
         self.nextSequence = nextSequence
@@ -708,6 +741,8 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         self.legacyTaskAssignments = legacyTaskAssignments
         self.settings = settings
         self.cachedUser = cachedUser
+        self.bootstrapUser = bootstrapUser
+        self.pendingBootstrapResolution = pendingBootstrapResolution
     }
 
     init(from decoder: Decoder) throws {
@@ -735,6 +770,11 @@ struct PersistedTimerState: Codable, Equatable, Sendable {
         legacyTaskAssignments = try values.decodeIfPresent([String: UUID].self, forKey: .legacyTaskAssignments) ?? [:]
         settings = try values.decodeIfPresent(TimerSettings.self, forKey: .settings) ?? TimerSettings()
         cachedUser = try values.decodeIfPresent(User.self, forKey: .cachedUser)
+        bootstrapUser = try values.decodeIfPresent(User.self, forKey: .bootstrapUser)
+        pendingBootstrapResolution = try values.decodeIfPresent(
+            BootstrapResolveRequest.self,
+            forKey: .pendingBootstrapResolution
+        )
     }
 
     mutating func migrateLegacyTasks(_ legacy: LocalTaskState, at date: Date = .now) {
@@ -1014,6 +1054,7 @@ enum AppError: LocalizedError {
     case missingPresentationAnchor
     case missingIDToken
     case unauthorized
+    case conflict(String)
     case server(String)
     case invalidResponse
 
@@ -1023,6 +1064,7 @@ enum AppError: LocalizedError {
         case .missingPresentationAnchor: "No window is available for Google Sign-In."
         case .missingIDToken: "Google did not return an identity token."
         case .unauthorized: "Session expired. Sign in again."
+        case .conflict(let message): message
         case .server(let message): message
         case .invalidResponse: "Server returned an invalid response."
         }

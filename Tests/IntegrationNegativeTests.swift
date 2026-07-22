@@ -225,4 +225,81 @@ struct IntegrationNegativeTests {
             Issue.record("Unexpected error: \(error)")
         }
     }
+
+    @Test @MainActor
+    func bootstrapRevisionConflictPreservesLocalDataAndReturnsToChooser() async throws {
+        let scenario = "bootstrap-cas-conflict"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var state = PersistedTimerState.fresh()
+        state.bootstrapUser = TestFixtures.user
+        state.pendingCommands = [
+            TestFixtures.command(.start, sequence: 1, elapsed: 0, timerID: "local-timer"),
+            TestFixtures.command(.finish, sequence: 2, elapsed: 60_000, timerID: "local-timer")
+        ]
+        defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+        await model.restore()
+
+        model.requestHistoryResolution(.keepRemote)
+        await model.confirmHistoryResolution()
+
+        #expect(model.historyResolutionState == .choosing)
+        #expect(model.history.map(\.id) == ["local-timer"])
+        #expect(model.pendingCommandCount == 2)
+        let persistedData = try #require(defaults.data(forKey: "timer-state-v2"))
+        let persisted = try JSONDecoder.api.decode(PersistedTimerState.self, from: persistedData)
+        #expect(persisted.cachedUser == nil)
+        #expect(persisted.pendingBootstrapResolution == nil)
+        let requests = TestFixtures.recordedRequests(for: scenario)
+        #expect(requests.count { $0.path == "/api/v1/bootstrap" } == 2)
+        #expect(requests.count { $0.path == "/api/v1/bootstrap/resolve" } == 1)
+        #expect(requests.allSatisfy { $0.path != "/api/v1/sync" })
+    }
+
+    @Test @MainActor
+    func missingTaskAcknowledgementPreservesQueueAndCanonicalState() async throws {
+        let scenario = "task-missing-ack"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let task = try #require(FocusTask(title: "Local task"))
+        let operation = TaskOperation(
+            id: "task-operation-missing-ack",
+            taskId: task.id.uuidString.lowercased(),
+            type: .upsert,
+            title: task.title,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 2,
+            hlcCounter: 0
+        )
+        var state = PersistedTimerState.fresh()
+        state.cachedUser = TestFixtures.user
+        state.pendingTaskOperations = [operation]
+        defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        #expect(model.pendingChangeCount == 1)
+        #expect(model.tasks == [task])
+        #expect(model.history.isEmpty)
+        #expect(model.errorMessage?.contains("1 queued changes remain") == true)
+        let data = try #require(defaults.data(forKey: "timer-state-v2"))
+        let persisted = try JSONDecoder.api.decode(PersistedTimerState.self, from: data)
+        #expect(persisted.pendingTaskOperations == [operation])
+    }
 }

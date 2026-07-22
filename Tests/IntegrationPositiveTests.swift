@@ -473,4 +473,351 @@ struct IntegrationPositiveTests {
         #expect(state.selectedTaskID == nil)
         #expect(state.legacyTaskAssignments.isEmpty)
     }
+
+    @Test @MainActor
+    func localOnlyHistoryAutomaticallyReplacesRemoteWithCompleteQueues() async throws {
+        let scenario = "bootstrap-local-only"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let initial = try bootstrapState(hasLocalHistory: true)
+        defaults.set(try JSONEncoder.api.encode(initial), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        let requests = TestFixtures.recordedRequests(for: scenario)
+        let syncPaths = requests.filter { $0.path == "/api/v1/bootstrap" || $0.path == "/api/v1/bootstrap/resolve" || $0.path == "/api/v1/sync" }
+        #expect(syncPaths.map { "\($0.method) \($0.path)" } == [
+            "GET /api/v1/bootstrap",
+            "POST /api/v1/bootstrap/resolve",
+            "POST /api/v1/sync"
+        ])
+        let resolve = try #require(requests.first { $0.path == "/api/v1/bootstrap/resolve" })
+        let body = try requestJSON(resolve)
+        #expect(body["strategy"] as? String == "replace_remote")
+        #expect(body["expectedRevision"] as? Int == 5)
+        #expect((body["commands"] as? [Any])?.count == 2)
+        #expect((body["taskOperations"] as? [Any])?.count == 1)
+        #expect((body["durationOperations"] as? [Any])?.count == 1)
+        #expect(model.history.map(\.id) == ["local-history"])
+        #expect(model.pendingChangeCount == 0)
+        #expect(model.historyResolutionState == .none)
+        let persisted = try persistedState(defaults)
+        #expect(persisted.cachedUser == TestFixtures.user)
+        #expect(persisted.bootstrapUser == nil)
+        #expect(persisted.pendingBootstrapResolution == nil)
+    }
+
+    @Test @MainActor
+    func remoteOnlyHistoryAutomaticallyKeepsRemoteAndDiscardsLocalStateAfterSuccess() async throws {
+        let scenario = "bootstrap-remote-only"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let initial = try bootstrapState(hasLocalHistory: false)
+        defaults.set(try JSONEncoder.api.encode(initial), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        let resolve = try #require(TestFixtures.recordedRequests(for: scenario).first {
+            $0.path == "/api/v1/bootstrap/resolve"
+        })
+        let body = try requestJSON(resolve)
+        #expect(body["strategy"] as? String == "keep_remote")
+        #expect((body["commands"] as? [Any])?.isEmpty == true)
+        #expect((body["taskOperations"] as? [Any])?.isEmpty == true)
+        #expect((body["durationOperations"] as? [Any])?.isEmpty == true)
+        #expect(model.history.map(\.id) == ["remote-history"])
+        #expect(model.canonicalTimer == nil)
+        #expect(model.pendingChangeCount == 0)
+        #expect(try persistedState(defaults).cachedUser == TestFixtures.user)
+    }
+
+    @Test @MainActor
+    func bothHistoriesBlockSyncAndMutationsUntilConfirmedAndCancelIsSideEffectFree() async throws {
+        let scenario = "bootstrap-both-cancel"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let initial = try bootstrapState(hasLocalHistory: true)
+        defaults.set(try JSONEncoder.api.encode(initial), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        #expect(model.historyResolutionState == .choosing)
+        #expect(model.localHistoryResolutionCount == 1)
+        #expect(model.remoteHistoryResolutionCount == 1)
+        #expect(TestFixtures.recordedRequests(for: scenario).allSatisfy {
+            $0.path != "/api/v1/sync" && $0.path != "/api/v1/bootstrap/resolve"
+        })
+        await model.sync(force: true)
+        #expect(TestFixtures.recordedRequests(for: scenario).allSatisfy { $0.path != "/api/v1/sync" })
+        let persistedBeforeChoice = try #require(defaults.data(forKey: "timer-state-v2"))
+        let pendingBefore = model.pendingChangeCount
+        model.start()
+        model.setDurationMinutes(90, for: .focus)
+        #expect(!model.addTask("Blocked task"))
+        #expect(model.pendingChangeCount == pendingBefore)
+
+        model.requestHistoryResolution(.keepRemote)
+        #expect(model.historyResolutionState == .confirming(.keepRemote))
+        #expect(try persistedState(defaults).pendingBootstrapResolution == nil)
+        model.cancelHistoryResolutionConfirmation()
+
+        #expect(model.historyResolutionState == .choosing)
+        model.requestHistoryResolution(.replaceRemote)
+        #expect(model.historyResolutionState == .confirming(.replaceRemote))
+        model.cancelHistoryResolutionConfirmation()
+        #expect(defaults.data(forKey: "timer-state-v2") == persistedBeforeChoice)
+        #expect(TestFixtures.recordedRequests(for: scenario).allSatisfy {
+            $0.path != "/api/v1/bootstrap/resolve"
+        })
+    }
+
+    @Test @MainActor
+    func keepBothRequiresConfirmationAndInstallsMergedCanonicalHistory() async throws {
+        let scenario = "bootstrap-merge"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(try JSONEncoder.api.encode(bootstrapState(hasLocalHistory: true)), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+        await model.restore()
+
+        model.requestHistoryResolution(.merge)
+        #expect(model.historyResolutionState == .confirming(.merge))
+        #expect(TestFixtures.recordedRequests(for: scenario).allSatisfy {
+            $0.path != "/api/v1/bootstrap/resolve"
+        })
+        await model.confirmHistoryResolution()
+
+        let resolve = try #require(TestFixtures.recordedRequests(for: scenario).first {
+            $0.path == "/api/v1/bootstrap/resolve"
+        })
+        let body = try requestJSON(resolve)
+        #expect(body["strategy"] as? String == "merge")
+        #expect((body["commands"] as? [Any])?.count == 2)
+        #expect(Set(model.history.map(\.id)) == ["local-history", "remote-history"])
+        #expect(model.historyResolutionState == .none)
+    }
+
+    @Test @MainActor
+    func transportFailurePreservesLocalDataAndRelaunchRetriesExactResolutionRequest() async throws {
+        let scenario = "bootstrap-network-retry"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(try JSONEncoder.api.encode(bootstrapState(hasLocalHistory: true)), forKey: "timer-state-v2")
+
+        do {
+            let session = TestFixtures.session(for: scenario)
+            defer { session.invalidateAndCancel() }
+            let model = AppModel(
+                api: APIClient(session: session, keychain: StaticTokenStore()),
+                defaults: defaults,
+                alarmScheduler: RecordingAlarmScheduler()
+            )
+            await model.restore()
+            model.requestHistoryResolution(.merge)
+            await model.confirmHistoryResolution()
+
+            #expect(model.historyResolutionState == .retryable(.merge))
+            #expect(model.history.map(\.id) == ["local-timer"])
+            let pending = try #require(persistedState(defaults).pendingBootstrapResolution)
+            #expect(pending.strategy == .merge)
+        }
+
+        let firstResolve = try #require(TestFixtures.recordedRequests(for: scenario).first {
+            $0.path == "/api/v1/bootstrap/resolve"
+        })
+        let secondSession = TestFixtures.session(for: scenario, resetsRecorder: false)
+        defer { secondSession.invalidateAndCancel() }
+        let restored = AppModel(
+            api: APIClient(session: secondSession, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await restored.restore()
+
+        let resolves = TestFixtures.recordedRequests(for: scenario).filter {
+            $0.path == "/api/v1/bootstrap/resolve"
+        }
+        #expect(resolves.count == 2)
+        #expect(resolves[0].body == resolves[1].body)
+        #expect(resolves[0].body == firstResolve.body)
+        #expect(TestFixtures.recordedRequests(for: scenario).count { $0.path == "/api/v1/bootstrap" } == 1)
+        #expect(restored.historyResolutionState == .none)
+        #expect(Set(restored.history.map(\.id)) == ["local-history", "remote-history"])
+        #expect(try persistedState(defaults).pendingBootstrapResolution == nil)
+    }
+
+    @Test @MainActor
+    func taskSyncEncodesOperationClearsAcknowledgementAndPullsRemoteTasks() async throws {
+        let scenario = "task-sync"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var state = PersistedTimerState.fresh()
+        state.cachedUser = TestFixtures.user
+        let operation = try taskOperation(title: "Local task")
+        state.pendingTaskOperations = [operation]
+        defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        let sync = try #require(TestFixtures.recordedRequests(for: scenario).first { $0.path == "/api/v1/sync" })
+        let body = try requestJSON(sync)
+        let taskOperations = try #require(body["taskOperations"] as? [[String: Any]])
+        let encoded = try #require(taskOperations.first)
+        #expect(Set(body.keys) == ["deviceId", "lastRevision", "commands", "taskOperations", "durationOperations"])
+        #expect(encoded["id"] as? String == operation.id)
+        #expect(encoded["taskId"] as? String == operation.taskId)
+        #expect(encoded["type"] as? String == "upsert")
+        #expect(encoded["title"] as? String == "Local task")
+        #expect(model.pendingChangeCount == 0)
+        #expect(model.tasks.map(\.title) == ["Remote task"])
+        #expect(model.history.map(\.id) == ["remote-history"])
+    }
+
+    @Test @MainActor
+    func differentEstablishedOwnerNeverOffersPreviousAccountHistory() async throws {
+        let scenario = "task-sync-different-owner"
+        let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var state = PersistedTimerState.fresh()
+        state.cachedUser = User(id: "different-user", email: "old@example.com", name: "Old", avatarUrl: "")
+        state.history = [TestFixtures.history(
+            id: "old-account-history",
+            durationMs: 25 * 60_000,
+            date: TestFixtures.anchor
+        )]
+        defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+        let session = TestFixtures.session(for: scenario)
+        defer { session.invalidateAndCancel() }
+        let model = AppModel(
+            api: APIClient(session: session, keychain: StaticTokenStore()),
+            defaults: defaults,
+            alarmScheduler: RecordingAlarmScheduler()
+        )
+
+        await model.restore()
+
+        #expect(model.sessionState == .signedIn(TestFixtures.user))
+        #expect(model.historyResolutionState == .none)
+        #expect(model.history.map(\.id) == ["remote-history"])
+        #expect(TestFixtures.recordedRequests(for: scenario).allSatisfy { $0.path != "/api/v1/bootstrap" })
+    }
+
+    @Test @MainActor
+    func emptyHistoriesMergeLocalQueuesAndOtherwiseKeepRemote() async throws {
+        for (scenario, state, expectedStrategy) in [
+            ("bootstrap-empty-merge", try bootstrapState(hasLocalHistory: false), "merge"),
+            ("bootstrap-empty-keep", emptyBootstrapState(), "keep_remote")
+        ] {
+            let suiteName = "PomodoroughTests.\(UUID().uuidString)"
+            let defaults = try #require(UserDefaults(suiteName: suiteName))
+            defer { defaults.removePersistentDomain(forName: suiteName) }
+            defaults.set(try JSONEncoder.api.encode(state), forKey: "timer-state-v2")
+            let session = TestFixtures.session(for: scenario)
+            defer { session.invalidateAndCancel() }
+            let model = AppModel(
+                api: APIClient(session: session, keychain: StaticTokenStore()),
+                defaults: defaults,
+                alarmScheduler: RecordingAlarmScheduler()
+            )
+
+            await model.restore()
+
+            let resolve = try #require(TestFixtures.recordedRequests(for: scenario).first {
+                $0.path == "/api/v1/bootstrap/resolve"
+            })
+            #expect(try requestJSON(resolve)["strategy"] as? String == expectedStrategy)
+            #expect(model.history.isEmpty)
+            #expect(model.historyResolutionState == .none)
+        }
+    }
+
+    private func bootstrapState(hasLocalHistory: Bool) throws -> PersistedTimerState {
+        var state = PersistedTimerState.fresh()
+        state.bootstrapUser = TestFixtures.user
+        state.pendingCommands = hasLocalHistory
+            ? [
+                TestFixtures.command(.start, sequence: 1, elapsed: 0, timerID: "local-timer"),
+                TestFixtures.command(.finish, sequence: 2, elapsed: 60_000, timerID: "local-timer")
+            ]
+            : [TestFixtures.command(.start, sequence: 1, elapsed: 0, timerID: "local-timer")]
+        state.pendingTaskOperations = [try taskOperation(title: "Local task")]
+        state.pendingDurationOperations = [TestFixtures.durationOperation(
+            id: "duration-operation-bootstrap",
+            phase: .focus,
+            durationMs: 30 * 60_000,
+            wallMs: 3
+        )]
+        return state
+    }
+
+    private func emptyBootstrapState() -> PersistedTimerState {
+        var state = PersistedTimerState.fresh()
+        state.bootstrapUser = TestFixtures.user
+        return state
+    }
+
+    private func taskOperation(title: String) throws -> TaskOperation {
+        let task = try #require(FocusTask(title: title))
+        return TaskOperation(
+            id: "task-operation-\(title.lowercased().replacingOccurrences(of: " ", with: "-"))",
+            taskId: task.id.uuidString.lowercased(),
+            type: .upsert,
+            title: task.title,
+            occurredAt: TestFixtures.anchor,
+            hlcWallMs: 2,
+            hlcCounter: 0
+        )
+    }
+
+    private func persistedState(_ defaults: UserDefaults) throws -> PersistedTimerState {
+        let data = try #require(defaults.data(forKey: "timer-state-v2"))
+        return try JSONDecoder.api.decode(PersistedTimerState.self, from: data)
+    }
+
+    private func requestJSON(_ request: RecordedRequest) throws -> [String: Any] {
+        let data = try #require(request.body)
+        return try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
 }

@@ -10,6 +10,15 @@ final class AppModel {
         case signedIn(User)
     }
 
+    enum HistoryResolutionState: Equatable {
+        case none
+        case preflighting
+        case choosing
+        case confirming(BootstrapResolutionStrategy)
+        case submitting(BootstrapResolutionStrategy)
+        case retryable(BootstrapResolutionStrategy?)
+    }
+
     private let api: APIClient
     private let defaults: UserDefaults
     private let alarmScheduler: any TimerAlarmScheduling
@@ -25,6 +34,7 @@ final class AppModel {
     @ObservationIgnored private var revisionHints = RevisionHintCoalescer()
     @ObservationIgnored private var completionQueuedFor: String?
     @ObservationIgnored private var sessionGeneration = 0
+    @ObservationIgnored private var bootstrapSnapshot: SyncResponse?
 
     private(set) var sessionState: SessionState = .restoring
     private(set) var canonicalTimer: CanonicalTimer?
@@ -34,6 +44,9 @@ final class AppModel {
     private(set) var isSyncing = false
     private(set) var isOffline = false
     private(set) var conflictMessage: String?
+    private(set) var historyResolutionState: HistoryResolutionState = .none
+    private(set) var localHistoryResolutionCount = 0
+    private(set) var remoteHistoryResolutionCount = 0
     private(set) var needsPermissionIntroduction = false
     var errorMessage: String?
 
@@ -92,7 +105,7 @@ final class AppModel {
     var selectedPhase: TimerPhase {
         get { timerState.settings.selectedPhase }
         set {
-            guard !isTimerActive else { return }
+            guard !isTimerActive, !isHistoryResolutionBlocking else { return }
             timerState.settings.selectedPhase = newValue
             persist()
         }
@@ -101,7 +114,7 @@ final class AppModel {
     var selectedTaskID: UUID? {
         get { timerState.selectedTaskID }
         set {
-            guard !isTimerActive,
+            guard !isTimerActive, !isHistoryResolutionBlocking,
                   newValue == nil || tasks.contains(where: { $0.id == newValue }) else { return }
             timerState.selectedTaskID = newValue
             persist()
@@ -111,6 +124,7 @@ final class AppModel {
     var autoStartBreaks: Bool {
         get { timerState.settings.autoStartBreaks }
         set {
+            guard !isHistoryResolutionBlocking else { return }
             timerState.settings.autoStartBreaks = newValue
             persist()
         }
@@ -129,11 +143,21 @@ final class AppModel {
     var pendingChangeCount: Int {
         pendingCommandCount + timerState.pendingTaskOperations.count + pendingDurationOperationCount
     }
+    var isHistoryResolutionBlocking: Bool { historyResolutionState != .none }
     var completedFocusCount: Int { history.count { $0.status == "completed" && $0.phase == .focus } }
     var deviceMark: String { String(timerState.deviceId.suffix(4)).uppercased() }
 
     var syncLabel: String {
         if !isSignedIn { return "On device" }
+        if isHistoryResolutionBlocking {
+            switch historyResolutionState {
+            case .preflighting: return "Checking history"
+            case .choosing, .confirming: return "Choose history"
+            case .submitting: return "Resolving history"
+            case .retryable: return "History retry needed"
+            case .none: break
+            }
+        }
         if conflictMessage != nil { return "Review conflict" }
         if pendingChangeCount > 0 { return "\(pendingChangeCount) queued" }
         if isOffline { return "Offline" }
@@ -144,12 +168,13 @@ final class AppModel {
     func durationMinutes(for phase: TimerPhase) -> Int { timerState.settings.minutes(for: phase) }
 
     func selectPhase(_ phase: TimerPhase) {
-        guard !isTimerActive else { return }
+        guard !isTimerActive, !isHistoryResolutionBlocking else { return }
         clearInactiveTimerForConfigurationChange()
         selectedPhase = phase
     }
 
     func setDurationMinutes(_ minutes: Int, for phase: TimerPhase) {
+        guard !isHistoryResolutionBlocking else { return }
         let clamped = min(180, max(1, minutes))
         let durationMs = Int64(clamped) * 60_000
         guard timerState.settings.durationMs(for: phase) != durationMs else { return }
@@ -172,6 +197,7 @@ final class AppModel {
 
     @discardableResult
     func addTask(_ title: String) -> Bool {
+        guard !isHistoryResolutionBlocking else { return false }
         guard let task = FocusTask(title: title) else { return false }
         guard !tasks.contains(where: { $0.id == task.id }) else { return true }
         timerState.mergeKnownTasks([task])
@@ -180,6 +206,7 @@ final class AppModel {
     }
 
     func deleteTask(id: UUID) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let task = tasks.first(where: { $0.id == id }) else { return }
         if timerState.selectedTaskID == id { timerState.selectedTaskID = nil }
         enqueueTaskOperation(.delete, task: task)
@@ -227,7 +254,7 @@ final class AppModel {
                 return
             }
             guard generation == sessionGeneration else { return }
-            guard let cachedUser = timerState.cachedUser else {
+            guard let cachedUser = timerState.cachedUser ?? timerState.bootstrapUser else {
                 sessionGeneration += 1
                 sessionVerification.invalidate()
                 syncOwnership.invalidate()
@@ -282,13 +309,10 @@ final class AppModel {
                     )
                 )
                 guard generation == sessionGeneration else { return }
-                timerState.prepare(for: me.user)
-                rebuildOptimisticState()
                 sessionVerification.markVerified(generation: generation)
                 sessionState = .signedIn(me.user)
                 isOffline = false
-                persist()
-                await sync(force: true)
+                await completeAuthenticatedSession(user: me.user, generation: generation)
             } catch {
                 guard generation == sessionGeneration else { return }
                 errorMessage = error.localizedDescription
@@ -308,6 +332,10 @@ final class AppModel {
         sessionVerificationOwner = nil
         syncOwnership.invalidate()
         isSyncing = false
+        historyResolutionState = .none
+        bootstrapSnapshot = nil
+        localHistoryResolutionCount = 0
+        remoteHistoryResolutionCount = 0
         revisionHints = RevisionHintCoalescer()
         isWorking = true
         retryTask?.cancel()
@@ -325,6 +353,7 @@ final class AppModel {
     }
 
     func start() {
+        guard !isHistoryResolutionBlocking else { return }
         let timerID = "timer-\(UUID().uuidString.lowercased())"
         let phase = selectedPhase
         let duration = TimeInterval(timerState.settings.durationMs(for: phase)) / 1_000
@@ -349,6 +378,7 @@ final class AppModel {
     }
 
     func pause(at date: Date = .now) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer else { return }
         enqueue(.pause, timer: timer, elapsed: timer.elapsed(at: date))
         guard timer.status == .running else { return }
@@ -358,6 +388,7 @@ final class AppModel {
     }
 
     func resume(at date: Date = .now) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer else { return }
         let remainingDuration = max(1, timer.remaining(at: date))
         enqueue(.resume, timer: timer, elapsed: timer.elapsed(at: date))
@@ -372,10 +403,12 @@ final class AppModel {
     }
 
     func finish(at date: Date = .now) {
+        guard !isHistoryResolutionBlocking else { return }
         finish(at: date, cancelsAlarm: true)
     }
 
     private func finish(at date: Date, cancelsAlarm: Bool) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer else { return }
         let finishedPhase = timer.phase
         enqueue(.finish, timer: timer, elapsed: timer.elapsed(at: date))
@@ -388,6 +421,7 @@ final class AppModel {
     }
 
     func cancel(at date: Date = .now) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer else { return }
         enqueue(.cancel, timer: timer, elapsed: timer.elapsed(at: date))
         if timer.status == .running || timer.status == .paused {
@@ -396,12 +430,14 @@ final class AppModel {
     }
 
     func clear() {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer, !isTimerActive else { return }
         enqueue(.clear, timer: timer, elapsed: timer.elapsed(at: .now))
         cancelAlarm(timerID: timer.id, reportsError: false)
     }
 
     func completeIfNeeded(timerID: String, at date: Date) {
+        guard !isHistoryResolutionBlocking else { return }
         guard let timer = canonicalTimer,
               timer.id == timerID,
               timer.status == .running,
@@ -417,13 +453,40 @@ final class AppModel {
 
     func dismissConflict() { conflictMessage = nil }
 
+    func requestHistoryResolution(_ strategy: BootstrapResolutionStrategy) {
+        guard historyResolutionState == .choosing else { return }
+        historyResolutionState = .confirming(strategy)
+    }
+
+    func cancelHistoryResolutionConfirmation() {
+        guard case .confirming = historyResolutionState else { return }
+        historyResolutionState = .choosing
+    }
+
+    func confirmHistoryResolution() async {
+        guard case .confirming(let strategy) = historyResolutionState,
+              let snapshot = bootstrapSnapshot else { return }
+        await submitBootstrapResolution(strategy: strategy, snapshot: snapshot)
+    }
+
+    func retryHistoryResolution() async {
+        guard case .retryable = historyResolutionState else { return }
+        let generation = sessionGeneration
+        if let request = timerState.pendingBootstrapResolution {
+            await submitPersistedBootstrapResolution(request, generation: generation)
+        } else {
+            await preflightBootstrapResolution(generation: generation)
+        }
+    }
+
     func sync(force: Bool = false, showsActivity: Bool = true) async {
-        guard isSignedIn else { return }
+        guard isSignedIn, !isHistoryResolutionBlocking else { return }
         let generation = sessionGeneration
         guard sessionVerification.allows(generation: generation) else {
             await verifyRestoredSession(generation: generation)
             return
         }
+        guard timerState.cachedUser?.id == user?.id else { return }
         if !force,
            timerState.pendingCommands.isEmpty,
            timerState.pendingTaskOperations.isEmpty,
@@ -519,8 +582,10 @@ final class AppModel {
     func refreshAfterForeground() async {
         guard isSignedIn else { return }
         completionQueuedFor = nil
-        startRevisionStream()
-        startRemotePolling()
+        if !isHistoryResolutionBlocking {
+            startRevisionStream()
+            startRemotePolling()
+        }
         await sync(force: true)
     }
 
@@ -677,11 +742,230 @@ final class AppModel {
         timerState.hlcCounter = merged.counter
     }
 
+    private func completeAuthenticatedSession(user: User, generation: Int) async {
+        guard generation == sessionGeneration, isSignedIn else { return }
+        if timerState.cachedUser != nil {
+            timerState.prepare(for: user)
+            historyResolutionState = .none
+            bootstrapSnapshot = nil
+            localHistoryResolutionCount = 0
+            remoteHistoryResolutionCount = 0
+            rebuildOptimisticState()
+            persist()
+            await sync(force: true)
+            return
+        }
+
+        if timerState.bootstrapUser?.id != user.id {
+            timerState.pendingBootstrapResolution = nil
+        }
+        timerState.bootstrapUser = user
+        persist()
+        if let request = timerState.pendingBootstrapResolution {
+            await submitPersistedBootstrapResolution(request, generation: generation)
+        } else {
+            await preflightBootstrapResolution(generation: generation)
+        }
+    }
+
+    private func preflightBootstrapResolution(generation: Int, autoSubmits: Bool = true) async {
+        guard generation == sessionGeneration,
+              isSignedIn,
+              timerState.cachedUser == nil,
+              timerState.bootstrapUser?.id == user?.id else { return }
+        retryTask?.cancel()
+        retryTask = nil
+        cancelRevisionStream()
+        historyResolutionState = .preflighting
+        isSyncing = false
+        do {
+            let response = try await api.bootstrap()
+            guard generation == sessionGeneration,
+                  isSignedIn,
+                  timerState.cachedUser == nil else { return }
+            bootstrapSnapshot = response
+            localHistoryResolutionCount = history.count
+            remoteHistoryResolutionCount = response.history.count
+            isOffline = false
+            errorMessage = nil
+
+            if localHistoryResolutionCount > 0, remoteHistoryResolutionCount > 0 {
+                historyResolutionState = .choosing
+                return
+            }
+
+            guard autoSubmits else {
+                historyResolutionState = .retryable(nil)
+                return
+            }
+
+            let strategy: BootstrapResolutionStrategy
+            if localHistoryResolutionCount > 0 {
+                strategy = .replaceRemote
+            } else if remoteHistoryResolutionCount > 0 {
+                strategy = .keepRemote
+            } else {
+                strategy = hasLocalBootstrapState ? .merge : .keepRemote
+            }
+            await submitBootstrapResolution(strategy: strategy, snapshot: response)
+        } catch AppError.unauthorized {
+            await invalidateUnauthorizedSession(generation: generation)
+        } catch AppError.invalidResponse {
+            guard generation == sessionGeneration, isSignedIn else { return }
+            historyResolutionState = .retryable(nil)
+            isOffline = false
+            errorMessage = "History setup paused because the server returned an invalid response. Local data remains on this device."
+        } catch {
+            guard generation == sessionGeneration, isSignedIn else { return }
+            historyResolutionState = .retryable(nil)
+            isOffline = true
+            scheduleRetry()
+        }
+    }
+
+    private var hasLocalBootstrapState: Bool {
+        !timerState.pendingCommands.isEmpty
+            || !timerState.pendingTaskOperations.isEmpty
+            || !timerState.pendingDurationOperations.isEmpty
+            || timerState.canonicalTimer != nil
+            || !timerState.history.isEmpty
+            || !timerState.tasks.isEmpty
+    }
+
+    private func submitBootstrapResolution(
+        strategy: BootstrapResolutionStrategy,
+        snapshot: SyncResponse
+    ) async {
+        guard timerState.pendingBootstrapResolution == nil else { return }
+        let includesLocalOperations = strategy != .keepRemote
+        let request = BootstrapResolveRequest(
+            requestId: "bootstrap-resolution-\(UUID().uuidString.lowercased())",
+            deviceId: timerState.deviceId,
+            expectedRevision: snapshot.revision,
+            strategy: strategy,
+            commands: includesLocalOperations ? timerState.pendingCommands : [],
+            taskOperations: includesLocalOperations ? timerState.pendingTaskOperations : [],
+            durationOperations: includesLocalOperations ? timerState.pendingDurationOperations : []
+        )
+        timerState.pendingBootstrapResolution = request
+        persist()
+        await submitPersistedBootstrapResolution(request, generation: sessionGeneration)
+    }
+
+    private func submitPersistedBootstrapResolution(
+        _ request: BootstrapResolveRequest,
+        generation: Int
+    ) async {
+        guard generation == sessionGeneration,
+              isSignedIn,
+              timerState.cachedUser == nil,
+              timerState.bootstrapUser?.id == user?.id,
+              timerState.pendingBootstrapResolution == request else { return }
+        retryTask?.cancel()
+        retryTask = nil
+        historyResolutionState = .submitting(request.strategy)
+        do {
+            let response = try await api.resolveBootstrap(request)
+            guard generation == sessionGeneration,
+                  isSignedIn,
+                  timerState.pendingBootstrapResolution == request,
+                  let bootstrapUser = timerState.bootstrapUser else { return }
+            let previousTimer = activeTimer
+            try applyBootstrapResolution(response, request: request, user: bootstrapUser)
+            if let previousTimer,
+               response.canonicalTimer?.id != previousTimer.id
+                    || response.canonicalTimer?.status == .completed
+                    || response.canonicalTimer?.status == .cancelled
+                    || response.canonicalTimer?.status == .superseded {
+                cancelAlarm(timerID: previousTimer.id, reportsError: false)
+            }
+            await sync(force: true)
+        } catch AppError.unauthorized {
+            await invalidateUnauthorizedSession(generation: generation)
+        } catch AppError.conflict {
+            guard generation == sessionGeneration, isSignedIn else { return }
+            timerState.pendingBootstrapResolution = nil
+            bootstrapSnapshot = nil
+            persist()
+            await preflightBootstrapResolution(generation: generation, autoSubmits: false)
+        } catch AppError.invalidResponse {
+            guard generation == sessionGeneration, isSignedIn else { return }
+            historyResolutionState = .retryable(request.strategy)
+            isOffline = false
+            errorMessage = "History setup paused because the server returned an invalid response. Your saved choice and local data were preserved."
+        } catch {
+            guard generation == sessionGeneration, isSignedIn else { return }
+            historyResolutionState = .retryable(request.strategy)
+            isOffline = true
+            scheduleRetry()
+        }
+    }
+
+    private func applyBootstrapResolution(
+        _ response: SyncResponse,
+        request: BootstrapResolveRequest,
+        user: User
+    ) throws {
+        guard response.durationsMs.isValid else { throw AppError.invalidResponse }
+        let commandAcknowledgements = response.acknowledgements.map(\.commandId)
+        let taskAcknowledgements = response.taskAcknowledgements.map(\.operationId)
+        let durationAcknowledgements = response.durationAcknowledgements.map(\.operationId)
+        guard Self.isAcknowledgementSubset(commandAcknowledgements, of: request.commands.map(\.id)),
+              Self.isAcknowledgementSubset(taskAcknowledgements, of: request.taskOperations.map(\.id)),
+              Self.isAcknowledgementSubset(durationAcknowledgements, of: request.durationOperations.map(\.id)) else {
+            throw AppError.invalidResponse
+        }
+        var resolved = timerState
+        if request.strategy == .keepRemote {
+            resolved.pendingCommands = []
+            resolved.pendingTaskOperations = []
+            resolved.pendingDurationOperations = []
+            resolved.knownTasks = response.tasks
+            resolved.selectedTaskID = nil
+            resolved.legacyTaskAssignments = [:]
+        } else {
+            let commandIDs = Set(commandAcknowledgements)
+            let taskIDs = Set(taskAcknowledgements)
+            let durationIDs = Set(durationAcknowledgements)
+            resolved.pendingCommands.removeAll { commandIDs.contains($0.id) }
+            resolved.pendingTaskOperations.removeAll { taskIDs.contains($0.id) }
+            resolved.pendingDurationOperations.removeAll { durationIDs.contains($0.id) }
+            resolved.mergeKnownTasks(response.tasks)
+        }
+
+        resolved.revision = response.revision
+        resolved.canonicalTimer = response.canonicalTimer
+        resolved.history = response.history
+        resolved.tasks = response.tasks
+        resolved.settings.durationsMs = DurationReducer.applying(
+            resolved.pendingDurationOperations,
+            to: response.durationsMs
+        )
+        resolved.cachedUser = user
+        resolved.bootstrapUser = nil
+        resolved.pendingBootstrapResolution = nil
+        timerState = resolved
+        mergeServerClock(response.serverHlcWallMs, response.serverHlcCounter)
+        bootstrapSnapshot = nil
+        historyResolutionState = .none
+        localHistoryResolutionCount = 0
+        remoteHistoryResolutionCount = 0
+        isOffline = false
+        errorMessage = nil
+        rebuildOptimisticState()
+        persist()
+    }
+
+    private static func isAcknowledgementSubset(_ acknowledged: [String], of sent: [String]) -> Bool {
+        let acknowledgedSet = Set(acknowledged)
+        return acknowledgedSet.count == acknowledged.count && acknowledgedSet.isSubset(of: Set(sent))
+    }
+
     private func verifyRestoredSession(generation: Int) async {
         guard generation == sessionGeneration,
               isSignedIn,
               !sessionVerification.allows(generation: generation),
-              timerState.cachedUser != nil,
+              timerState.cachedUser != nil || timerState.bootstrapUser != nil,
               sessionVerificationOwner == nil else { return }
         let owner = UUID()
         sessionVerificationOwner = owner
@@ -693,13 +977,10 @@ final class AppModel {
             guard generation == sessionGeneration,
                   isSignedIn,
                   sessionVerificationOwner == owner else { return }
-            timerState.prepare(for: response.user)
-            rebuildOptimisticState()
             sessionVerification.markVerified(generation: generation)
             sessionState = .signedIn(response.user)
             isOffline = false
-            persist()
-            await sync(force: true)
+            await completeAuthenticatedSession(user: response.user, generation: generation)
         } catch AppError.unauthorized {
             await invalidateUnauthorizedSession(generation: generation)
         } catch {
@@ -723,6 +1004,15 @@ final class AppModel {
         retryTask = nil
         cancelRevisionStream()
         sessionState = .localOnly
+        if timerState.cachedUser == nil {
+            timerState.bootstrapUser = nil
+            timerState.pendingBootstrapResolution = nil
+            persist()
+        }
+        historyResolutionState = .none
+        bootstrapSnapshot = nil
+        localHistoryResolutionCount = 0
+        remoteHistoryResolutionCount = 0
         isOffline = false
         errorMessage = AppError.unauthorized.localizedDescription
         try? await api.clearTokens()
@@ -734,12 +1024,17 @@ final class AppModel {
             try? await Task.sleep(for: .seconds(5))
             guard !Task.isCancelled, let self else { return }
             self.retryTask = nil
-            await self.sync(force: true)
+            if self.isHistoryResolutionBlocking {
+                await self.retryHistoryResolution()
+            } else {
+                await self.sync(force: true)
+            }
         }
     }
 
     private func startRemotePolling() {
         guard isSignedIn,
+              !isHistoryResolutionBlocking,
               sessionVerification.allows(generation: sessionGeneration),
               revisionLifecycle.isActive,
               remotePollingTask == nil else { return }
@@ -767,6 +1062,7 @@ final class AppModel {
 
     private func startRevisionStream() {
         guard isSignedIn,
+              !isHistoryResolutionBlocking,
               sessionVerification.allows(generation: sessionGeneration),
               let streamID = revisionLifecycle.begin() else { return }
         let generation = sessionGeneration
